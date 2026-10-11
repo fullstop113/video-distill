@@ -1,0 +1,21 @@
+# 凭证 —— 绝不入库
+.env
+*.key
+data/credentials/
+data/session/
+
+# 中间件与产物
+data/
+output/
+*.log
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# 模型缓存
+models/
+.cache/

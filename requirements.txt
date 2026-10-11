@@ -1,0 +1,38 @@
+# video-distill Python 依赖
+#
+# ⚠️ torch / torchaudio 必须从 CUDA 版镜像装，不要用 PyPI：
+#   清华 PyPI 镜像上**只有 CPU 版** torch（方案 §3.3 实测），装上会导致 ASR 慢到不可用。
+#
+#   P0 实测结论（见 docs/p0-findings.md §1）：
+#     - cu124 镜像上可用的 cp313 + Windows wheel 只有 2.6.0 一代，三者必须配套锁死
+#     - 首选镜像改为上海交大：实测 5.87 MB/s；阿里云仅 0.19 MB/s（2.5GB 要 3.6 小时）
+#     - 不要用 curl 的 --speed-limit/--speed-time，它会在慢速时主动放弃，留下半成品
+#
+#   安装命令（已实测可用）：
+#     pwsh scripts/fetch_wheel.ps1 -Url "https://mirror.sjtu.edu.cn/pytorch-wheels/cu124/torch-2.6.0%2Bcu124-cp313-cp313-win_amd64.whl" -Out "data/wheels/torch-2.6.0+cu124-cp313-cp313-win_amd64.whl"
+#     pwsh scripts/fetch_wheel.ps1 -Url "https://mirror.sjtu.edu.cn/pytorch-wheels/cu124/torchaudio-2.6.0%2Bcu124-cp313-cp313-win_amd64.whl" -Out "data/wheels/torchaudio-2.6.0+cu124-cp313-cp313-win_amd64.whl"
+#     python -m pip install --no-deps data/wheels/torch-2.6.0+cu124-*.whl
+#     python -m pip install --no-deps data/wheels/torchaudio-2.6.0+cu124-*.whl
+#     python -m pip install filelock typing-extensions "sympy==1.13.1" networkx jinja2 fsspec "numpy>=2.1,<3" setuptools
+#   （--no-deps 是为了防止 pip 从 PyPI 拉来 CPU 版 torch 覆盖刚装的 CUDA 版）
+
+# --- 基础 ---
+requests>=2.32
+cryptography>=43
+python-dotenv>=1.0
+qrcode>=8.0
+pillow>=10                  # qrcode 渲染 PNG 需要（登录页要显示二维码）
+
+# --- P0/P1 取数与转写 ---
+imageio-ffmpeg>=0.6.0     # 自带 ffmpeg 二进制，绕开 GitHub 封锁（R6）
+funasr>=1.1               # 中文 ASR，模型走 ModelScope
+modelscope>=1.20
+# --- P2 总结 ---
+openai>=1.50              # 调 DeepSeek（OpenAI 兼容协议）
+# --- P3 Web ---
+fastapi>=0.115
+uvicorn[standard]>=0.30
+
+# --- 测试 ---
+pytest>=8
+

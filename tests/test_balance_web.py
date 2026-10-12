@@ -256,6 +256,67 @@ def test_index_shows_balance(env):
     assert 'href="/balance"' in html
 
 
+def test_index_balance_is_a_visible_link_not_buried_in_footer(env):
+    """**回归**：余额必须是首页**看得见的入口**，不能只靠页脚。
+
+    起因：使用者反馈"我管理员生成邀请码的按钮在哪里？我没有看到"。
+    按钮本身在 /balance 上，但首页只有页脚最底部一个"余额"链接 ——
+    入口太深，等于藏起来了。
+
+    所以断言：余额徽章旁边就有可点的链接（带箭头提示），
+    且该链接出现在账号卡片区域，不是页脚。
+    """
+    c = _login(env, ADMIN_UID, "管理员")
+    env["storage"].save_credentials(
+        env["storage"].Credentials(
+            uid=OPERATOR_UID, uname="操作号",
+            cookies={"SESSDATA": "s", "bili_jct": "j", "DedeUserID": OPERATOR_UID},
+            logged_in_at="2026-01-01T00:00:00",
+        )
+    )
+    html = c.get("/").text
+    # 切掉页脚，剩下的部分里必须还有余额链接
+    body = html.split("<footer>", 1)[0]
+    assert 'href="/balance"' in body, "余额链接只在页脚里，首页主体看不到入口"
+    assert "→" in body, "入口没有可点提示（应该像个链接）"
+
+
+def test_admin_sees_invite_entry_on_index(env):
+    """管理员在首页就该看到"邀请码"字样 —— 否则他找不到生成按钮。
+
+    这条直接对应使用者反馈的问题。
+    """
+    c = _login(env, ADMIN_UID, "管理员")
+    env["storage"].save_credentials(
+        env["storage"].Credentials(
+            uid=OPERATOR_UID, uname="操作号",
+            cookies={"SESSDATA": "s", "bili_jct": "j", "DedeUserID": OPERATOR_UID},
+            logged_in_at="2026-01-01T00:00:00",
+        )
+    )
+    body = c.get("/").text.split("<footer>", 1)[0]
+    assert "邀请码" in body, "管理员在首页看不到邀请码入口"
+
+
+def test_balance_badge_does_not_nest_kv_class(env):
+    """**回归**：徽章不能自己带 `.kv` 容器。
+
+    原实现返回 `<span class="kv">`，而调用方已把它放进
+    `<div class="kv">` —— class 重复嵌套。`.kv` 是 flex 布局，
+    嵌套会多出一层不可控的间距。
+    """
+    c = _login(env, ADMIN_UID, "管理员")
+    env["storage"].save_credentials(
+        env["storage"].Credentials(
+            uid=OPERATOR_UID, uname="操作号",
+            cookies={"SESSDATA": "s", "bili_jct": "j", "DedeUserID": OPERATOR_UID},
+            logged_in_at="2026-01-01T00:00:00",
+        )
+    )
+    html = c.get("/").text
+    assert 'class="kv"><span class="kv"' not in html, ".kv 被嵌套了"
+
+
 def test_nav_has_balance_link(env):
     c = _login(env, TEST_UID)
     html = c.get("/artifacts").text

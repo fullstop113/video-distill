@@ -1169,10 +1169,22 @@ def logout(request: Request):
 
 
 def _balance_badge(sess: dict | None) -> str:
-    """首页顶部展示余额。管理员显示"不限"。
+    """首页账号卡片里的余额展示，**余额本身可点进余额页**。
 
-    为什么放在首页而不是只放余额页：**用户提交前就该知道余额够不够**。
-    等提交完才告诉他"余额不足"，那一次等待就白费了。
+    ## 两处修正是因为"找不到邀请码按钮"
+
+    使用者反馈："我管理员生成邀请码的按钮在哪里？我没有看到"。
+    按钮本身是在 `/balance` 上的，但**首页只有页脚最底部一个"余额"链接**，
+    而"生成邀请码"是管理员功能、只在余额页上 —— 入口太深，等于藏起来了。
+
+    修法：把余额做成**看得见的入口**（`余额 ¥x.xx →`），
+    而不是让使用者去页脚找。
+
+    ## 另一个修掉的错误
+
+    原实现返回 `<span class="kv">`，而它被 `index()` 塞进
+    `<div class="kv">` 里 —— class 重复嵌套，`.kv` 是 flex 布局，
+    嵌套后会多出一层不可控的间距。这里只返回内容，容器由调用方给。
     """
     if not sess:
         return ""
@@ -1180,14 +1192,15 @@ def _balance_badge(sess: dict | None) -> str:
 
     uid = sess["uid"]
     if billing.is_admin(uid):
-        return ('<span class="kv"><b>余额</b>'
-                '<span class="pill ok">不限（管理员）</span></span>')
+        return ('<b>余额</b><span class="pill ok">不限（管理员）</span>'
+                '<a class="small" href="/balance">邀请码 / 充值 →</a>')
+
     b = billing.get(uid, sess.get("uname", ""))
     cls = "ok" if b.balance > 0 else ("warn" if b.balance > -billing.balance_floor()
                                       else "bad")
-    return (f'<span class="kv"><b>余额</b>'
+    return (f'<b>余额</b>'
             f'<span class="pill {cls}">¥{b.balance:.2f}</span>'
-            f'<a class="small" href="/balance">充值</a></span>')
+            f'<a class="small" href="/balance">充值 →</a>')
 
 
 def _invite_rows(uid: str) -> str:
@@ -1545,6 +1558,23 @@ def _to_bottom_html() -> str:
 """
 
 
+def _viewpoints_html(viewpoints: list[str]) -> str:
+    """up 主主要观点列表。
+
+    放在「总结」与「关键节点」之间：脉络看完之后先看 up 主主张什么，
+    再看转折点和详细要点，扫读效率最高。
+    """
+    if not viewpoints:
+        return ""
+    items = "".join(
+        f'<li>{html.escape(str(v))}</li>' for v in viewpoints
+    )
+    return (
+        '<h2>主要观点 <span class="mut small">up 主的核心论点</span></h2>'
+        f'<div class="card"><ol style="margin:0;padding-left:22px;line-height:1.9">{items}</ol></div>'
+    )
+
+
 def _highlights_html(highlights: list[dict]) -> str:
     """关键节点列表（原"时间轴"，已去掉时间戳与跳转）。
 
@@ -1595,6 +1625,7 @@ def _render_done(t, r: dict) -> str:
     {tldr}
     <h2>总结</h2>
     <div class="card">{_paragraphs(r.get('overall',''))}</div>
+    {_viewpoints_html(r.get('main_viewpoints') or [])}
     {_highlights_html(r.get('highlights') or [])}
     <h2>要点 <span class="mut small">
       {len(kps)} 条分段陈述</span></h2>

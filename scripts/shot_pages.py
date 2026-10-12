@@ -33,6 +33,8 @@ PAGES = {
     "artifacts": "/artifacts",
     "artifacts_all": "/artifacts?all_versions=1",
     "failed": "/?status=failed",
+    "balance": "/balance",
+    # 任务详情页：需要任务 id，用 --task <id> 传
 }
 
 
@@ -44,7 +46,8 @@ def fetch(path: str, port: int) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("page", choices=sorted(PAGES))
+    ap.add_argument("page", choices=sorted(PAGES) + ["task"])
+    ap.add_argument("--task", default="", help="page=task 时的任务 id")
     ap.add_argument("--port", type=int, default=8788)
     ap.add_argument("--height", type=int, default=980)
     args = ap.parse_args()
@@ -53,8 +56,16 @@ def main() -> int:
         print("找不到浏览器")
         return 2
 
+    if args.page == "task":
+        if not args.task:
+            print("page=task 需要 --task <任务id>")
+            return 2
+        path = f"/tasks/{args.task}"
+    else:
+        path = PAGES[args.page]
+
     try:
-        html = fetch(PAGES[args.page], args.port)
+        html = fetch(path, args.port)
     except Exception as exc:  # noqa: BLE001
         print(f"取页面失败：{type(exc).__name__}: {exc}")
         return 1

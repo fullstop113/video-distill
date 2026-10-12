@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -37,6 +38,56 @@ from .summarize import DeepSeekClient, SummarizeError
 from .transcript import NoTranscriptError
 
 log = logging.getLogger(__name__)
+
+# 心跳间隔（秒）。比 `requeue_stale` 的阈值小得多，才能可靠地区分
+# "进程死了"与"任务还在跑"。
+HEARTBEAT_INTERVAL = 15.0
+
+
+@contextlib.contextmanager
+def _heartbeat(task_id: str, interval: float = HEARTBEAT_INTERVAL):
+    """任务运行期间定期刷新心跳；退出时停掉。
+
+    ## 为什么需要它（实测的僵尸任务）
+
+    服务进程被强杀时，任务会永远停在 `RUNNING` —— 前端看起来像卡住了。
+    为此有 `tasks.requeue_stale()` 在启动时回收，但实测**它回收不了**：
+
+      · 判定条件是 `heartbeat='' OR heartbeat < now-3600s`
+      · 而 `heartbeat` 原先**只在任务开始和结束时各写一次**（假心跳）
+      · 所以刚被杀的僵尸任务心跳是"几分钟前"，
+        **既不满足"空"，也不满足"早于 1 小时前"** → 一条都收不回来
+
+    实测原文：
+
+        f30a8c9c0978  running  heartbeat='2026-10-12T19:46:39'
+        cutoff = 18:48:42      会被回收的条数 = 0
+
+    有了真心跳后，把 `requeue_stale` 的阈值调到明显大于心跳间隔
+    （见 `worker.start()`），判断就可靠了：
+      · 进程活着 → 心跳一直在刷新 → 不会被误回收
+      · 进程死了 → 心跳停在死亡时刻 → 超过阈值即回收
+
+    心跳线程是 daemon，且异常只记日志 —— 心跳失败不该影响任务本身。
+    """
+    stop = threading.Event()
+
+    def beat() -> None:
+        while not stop.wait(interval):
+            try:
+                # touch=True 即"只刷新心跳"（tasks.update 已有该语义）
+                tasks.update(task_id, touch=True)
+            except Exception:  # noqa: BLE001
+                log.debug("心跳更新失败（不影响任务）", exc_info=True)
+
+    t = threading.Thread(target=beat, name=f"vd-heartbeat-{task_id[:6]}",
+                         daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        t.join(timeout=2.0)
 
 
 class Worker:
@@ -59,7 +110,13 @@ class Worker:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
-        revived = tasks.requeue_stale()
+        # 回收僵尸任务。阈值必须**明显大于心跳间隔**：
+        #   · 进程活着 → 心跳每 15 秒刷新 → 不会被误回收
+        #   · 进程死了 → 心跳停在死亡时刻 → 90 秒后即被回收
+        #
+        # ⚠️ 这个值原先是默认的 3600 秒，配合"假心跳"（只在任务开始/结束
+        # 各写一次）导致**僵尸任务一条都收不回来**，实测卡了任务。
+        revived = tasks.requeue_stale(timeout_seconds=90)
         if revived:
             log.warning("恢复了 %d 个上次中断的任务", revived)
         self._stop.clear()
@@ -82,6 +139,7 @@ class Worker:
 
     # ---------- 主循环 ----------
 
+
     def _loop(self) -> None:
         while not self._stop.is_set():
             task = None
@@ -94,7 +152,8 @@ class Worker:
                 continue
             self._current = task.id
             try:
-                self._run(task)
+                with _heartbeat(task.id):
+                    self._run(task)
             finally:
                 self._current = ""
 
@@ -179,6 +238,8 @@ class Worker:
                 "summary_file": result.summary_path.name,
                 "tl_dr": result.summary.tl_dr,
                 "overall": result.summary.overall,
+                # up 主主要观点（核心论点）
+                "main_viewpoints": list(result.summary.main_viewpoints),
                 # 关键节点只保留文字（已去掉时间戳与跳转）
                 "highlights": [
                     {"text": h.text}

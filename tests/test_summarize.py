@@ -80,37 +80,32 @@ def test_parse_ts_rejects_garbage(bad):
     assert parse_ts(bad) is None
 
 
-# ---------------- 锚点校验（核心） ----------------
+# ---------------- 锚点校验（已移除：时间戳不再使用） ----------------
 
 
-def test_valid_anchor_is_kept():
+def test_validate_points_keeps_text_only():
+    """去掉时间戳后，validate_points 只保留文本要点，anchors 恒为空。"""
     raw = [{"text": "要点", "anchors": ["00:00:05"], "category": "结论"}]
     pts, dropped = validate_points(raw, SEGS)
-    assert pts[0].anchors == [5.0]
-    assert dropped == 0
+    assert pts[0].text == "要点"
+    assert pts[0].anchors == []  # 不再保留时间戳
+    assert dropped == 0  # 不再丢弃任何要点（除非文本为空）
 
 
-def test_rounding_within_tolerance_is_kept():
-    """模型常把时间戳取整，2 秒内应接受。"""
-    raw = [{"text": "要点", "anchors": ["00:00:06"], "category": "结论"}]
-    pts, dropped = validate_points(raw, SEGS)
-    assert pts[0].anchors == [5.0]
-    assert dropped == 0
-
-
-def test_fabricated_anchor_is_dropped():
-    """关键断言：模型编造的时间戳必须被丢掉，不能进产物。"""
+def test_validate_points_fabricated_anchor_ignored():
+    """编造的时间戳不再触发丢弃，只保留文本。"""
     raw = [{"text": "要点", "anchors": ["00:42:00"], "category": "结论"}]
     pts, dropped = validate_points(raw, SEGS)
     assert pts[0].anchors == []
-    assert dropped == 1
+    assert dropped == 0
 
 
-def test_mixed_anchors_keeps_only_valid():
+def test_validate_points_mixed_anchors_ignored():
+    """多个时间戳都被忽略，只保留文本。"""
     raw = [{"text": "要点", "anchors": ["00:00:05", "99:00:00", "00:00:12"]}]
     pts, dropped = validate_points(raw, SEGS)
-    assert pts[0].anchors == [5.0, 12.0]
-    assert dropped == 1
+    assert pts[0].anchors == []
+    assert dropped == 0
 
 
 def test_point_without_text_is_skipped():
@@ -120,7 +115,8 @@ def test_point_without_text_is_skipped():
     assert pts[0].text == "有用"
 
 
-def test_anchor_labels_are_formatted():
+def test_anchor_labels_still_formats_when_present():
+    """anchor_labels 方法保留，便于向后兼容。"""
     p = KeyPoint(text="x", anchors=[83.0])
     assert p.anchor_labels() == ["00:01:23"]
 
@@ -143,11 +139,25 @@ def test_chunking_single_chunk_when_small():
     assert len(chunk_segments(SEGS, max_chars=1000)) == 1
 
 
-def test_render_for_prompt_includes_timestamps():
-    out = render_for_prompt(SEGS)
+def test_render_for_prompt_defaults_to_no_timestamps():
+    """**回归**：默认渲染**不带**时间戳（2026 设计变更）。
+
+    时间戳占 prompt 的 58%（实测 19,193 → 8,108 token），
+    而产物本身就是总结、不需要跳回原视频，所以默认不带。
+
+    这条测试锁住**默认值**：如果有人把默认改回 True，
+    所有不传参的调用点都会悄悄把输入成本翻倍，且行为上看不出来。
+    """
+    out = render_for_prompt(SEGS)                     # 不传参
+    assert out.startswith("大家好"), f"默认竟然带了时间戳：{out[:30]!r}"
+    assert "[00:00:00]" not in out
+
+
+def test_render_for_prompt_switch_still_works():
+    """开关仍可用（供对比测量与将来恢复锚点用）。"""
+    out = render_for_prompt(SEGS, with_timestamps=True)
     assert out.startswith("[00:00:00] 大家好")
     assert "[00:00:05]" in out
-    assert render_for_prompt(SEGS, with_timestamps=False).startswith("大家好")
 
 
 # ---------------- 空产物校验 ----------------
@@ -285,7 +295,8 @@ def test_single_pass_produces_summary():
     )
     assert s.strategy is Strategy.SINGLE
     assert len(s.key_points) == 3
-    assert s.key_points[0].anchors == [5.0]
+    # 去掉时间戳后，anchors 恒为空
+    assert s.key_points[0].anchors == []
     assert s.usage.calls == 1
 
 
@@ -334,7 +345,8 @@ def test_summarize_rejects_empty_transcript():
     assert "逐字稿为空" in str(exc.value)
 
 
-def test_markdown_marks_points_without_anchor():
+def test_markdown_points_have_no_timestamps():
+    """去掉时间戳后，要点区块不再显示时间戳与出处链接。"""
     s = Summary(
         bvid="BVT", title="t", overall="总结" * 20,
         key_points=[KeyPoint("有出处", [83.0]), KeyPoint("没出处", [])],
@@ -342,8 +354,9 @@ def test_markdown_marks_points_without_anchor():
         usage=Usage(), elapsed=1.0,
     )
     md = to_markdown(s)
-    assert "[00:01:23]" in md
-    assert "无可靠出处" in md
+    # 不再显示时间戳和出处
+    assert "[00:01:23]" not in md
+    assert "无可靠出处" not in md
     assert "DISCLAIMER" not in md  # 只检查没写错变量
     assert "请勿转载" in md
 
@@ -362,32 +375,35 @@ def _info(duration=1749):
     return VideoInfo(bvid="BVT", cid=1, title="t", duration=duration, owner_name="u")
 
 
-def test_highlights_are_normalized_and_sorted():
+def test_highlights_keep_text_only():
+    """去掉时间戳后，highlights 只保留文本，at 恒为 0，不排序。"""
     raw = [
         {"at": "00:13:31", "text": "HGC 突然取消"},
         {"at": "00:01:41", "text": "错失 DOTA"},
         {"at": "00:05:16", "text": "推翻传统 MOBA 规则"},
     ]
     out, dropped = normalize_highlights(raw, _info())
-    assert [h.label for h in out] == ["00:01:41", "00:05:16", "00:13:31"]
+    # 保持原始顺序，不按时间排序
+    assert [h.text for h in out] == ["HGC 突然取消", "错失 DOTA", "推翻传统 MOBA 规则"]
+    assert [h.at for h in out] == [0.0, 0.0, 0.0]
     assert dropped == 0
 
 
-def test_highlights_drop_fabricated_timestamps():
-    """模型编造的时间戳必须丢掉 —— 与要点锚点同一原则。"""
+def test_highlights_drop_only_empty_text():
+    """现在只丢弃空文本，编造的时间戳不再触发丢弃。"""
     raw = [
         {"at": "00:01:41", "text": "真实"},
         {"at": "99:00:00", "text": "编造的超范围时间"},
         {"at": "开头", "text": "模糊位置"},
-        {"at": "00:02:00", "text": ""},          # 空文本
+        {"at": "00:02:00", "text": ""},          # 空文本 → 丢弃
     ]
     out, dropped = normalize_highlights(raw, _info(duration=1749))
-    assert [h.text for h in out] == ["真实"]
-    assert dropped == 3
+    assert [h.text for h in out] == ["真实", "编造的超范围时间", "模糊位置"]
+    assert dropped == 1
 
 
-def test_highlights_tolerate_small_overshoot():
-    """只超出视频末尾几秒不算编造（B 站时长本身有误差）。"""
+def test_highlights_ignore_overshoot_timestamp():
+    """超出视频时长的时间戳不再校验，只保留文本。"""
     out, dropped = normalize_highlights(
         [{"at": "00:29:20", "text": "结尾"}], _info(duration=1749)
     )
@@ -395,7 +411,7 @@ def test_highlights_tolerate_small_overshoot():
 
 
 def test_highlights_cap_count():
-    raw = [{"at": f"00:{i:02d}:00", "text": f"节点{i}"} for i in range(20)]
+    raw = [{"text": f"节点{i}"} for i in range(20)]
     out, dropped = normalize_highlights(raw, _info(duration=3600))
     assert len(out) == 12
     assert dropped == 8
@@ -403,15 +419,9 @@ def test_highlights_cap_count():
 
 def test_highlights_truncate_long_text():
     long_text = "很长" * 40
-    out, _ = normalize_highlights([{"at": "00:01:00", "text": long_text}], _info())
+    out, _ = normalize_highlights([{"text": long_text}], _info())
     assert len(out[0].text) <= 41
     assert out[0].text.endswith("…")
-
-
-def test_highlights_accept_alternate_field_name():
-    """模型偶尔把 at 写成 time，不该因此丢掉整条。"""
-    out, dropped = normalize_highlights([{"time": "00:01:00", "text": "x"}], _info())
-    assert len(out) == 1 and dropped == 0
 
 
 def test_highlights_empty_input():
@@ -493,16 +503,19 @@ def test_markdown_has_new_sections():
     md = to_markdown(_summary())
     assert "## 速览" in md
     assert "## 总结" in md
-    assert "## 关键时间轴" in md
+    assert "## 关键节点" in md
     assert "## 要点" in md
 
 
-def test_markdown_timeline_has_jump_links():
-    """时间轴图例要有跳转到下方要点的链接（跳视频不在这里）。"""
+def test_markdown_key_nodes_are_numbered_list():
+    """关键节点以编号列表展示，不再有时间戳与跳转链接。"""
     md = to_markdown(_summary())
-    timeline = md.split("## 关键时间轴", 1)[1].split("## 要点", 1)[0]
-    assert "跳到要点" in timeline
-    assert "第一个节点" in timeline
+    section = md.split("## 关键节点", 1)[1].split("## 要点", 1)[0]
+    assert "1. " in section
+    assert "2. " in section
+    # 不再有时间戳和跳要点链接
+    assert "跳到要点" not in section
+    assert "[00:" not in section
 
 
 def test_markdown_header_is_compact():
@@ -538,7 +551,7 @@ def test_markdown_shows_video_duration():
 
 def test_markdown_without_highlights_omits_section():
     md = to_markdown(_summary(highlights=[]))
-    assert "## 关键时间轴" not in md
+    assert "## 关键节点" not in md
     assert "## 要点" in md
 
 
@@ -693,31 +706,25 @@ def test_markdown_points_are_sections_not_list_items():
     assert numbered == headings, f"存在不是小节标题的编号项：{set(numbered) - set(headings)}"
 
 
-def test_markdown_point_anchors_link_to_video_with_timestamp():
-    """跳视频的动作落在**要点段落里的时间戳**上（用户要求的位置）。"""
+def test_markdown_points_have_no_video_links():
+    """去掉时间戳后，要点段落不再有跳原视频的时间戳链接。"""
     md = to_markdown(_summary(
         key_points=[KeyPoint("陈述。", [83.0, 131.0], "事实", "主题", "")]
     ))
-    assert "https://www.bilibili.com/video/BVT?t=83" in md
-    assert "https://www.bilibili.com/video/BVT?t=131" in md
-    assert "出处" in md
+    assert "https://www.bilibili.com/video/BVT?t=83" not in md
+    assert "https://www.bilibili.com/video/BVT?t=131" not in md
+    assert "出处" not in md
 
 
-def test_markdown_timeline_legend_links_down_to_points():
-    """时间轴图例要能跳到下方要点段落，**且不带跳视频**。
-
-    按用户要求，跳原视频的动作统一放在要点段落里。
-    第一版这里还带着"▶ 跳视频"，与 Web 端不一致 ——
-    同一份产物在网页和文件里行为不同，是"两套排版各写一遍"的漂移。
-    """
+def test_markdown_key_nodes_have_no_jump_links():
+    """关键节点不再有跳要点或跳视频的链接。"""
     md = to_markdown(_summary(
         key_points=[KeyPoint("陈述。", [70.0], "事实", "主题", "")],
         highlights=[TimelinePoint(70.0, "节点", 0)],
     ))
-    timeline = md.split("## 关键时间轴", 1)[1].split("## 要点", 1)[0]
-    assert "↓ 跳到要点 1" in timeline
-    assert "#1-" in timeline
-    assert "bilibili.com" not in timeline, "时间轴里不该再出现跳视频链接"
+    section = md.split("## 关键节点", 1)[1].split("## 要点", 1)[0]
+    assert "跳到要点" not in section
+    assert "bilibili.com" not in section
 
 
 def test_insight_prefix_is_not_duplicated():
@@ -774,14 +781,17 @@ def test_validate_points_trims_insight():
     assert pts[0].insight == "第一句话含义"
 
 
-def test_markdown_timeline_shows_arrow_block():
+def test_markdown_key_nodes_have_no_arrow_block():
+    """去掉时间轴后，关键节点不再显示箭头代码块。"""
     md = to_markdown(_summary(
         key_points=[KeyPoint("陈述。", [70.0], "事实", "主题", "")],
         highlights=[TimelinePoint(float(i * 60), f"节点{i}", 0) for i in range(3)],
     ))
-    assert "```" in md
-    assert "▶" in md
-    assert "❶" in md
+    # 关键节点是编号列表，不是箭头代码块
+    section = md.split("## 关键节点", 1)[1].split("## 要点", 1)[0]
+    assert "```" not in section
+    assert "▶" not in section
+    assert "1. 节点0" in section
 
 
 # ======================================================= max_tokens 预算与截断抢救
@@ -817,21 +827,30 @@ def test_headroom_covers_the_worst_observed_case():
     )
 
 
-def test_cap_kicks_in_before_chunking_threshold():
-    """封顶必须**早于**分片阈值。
+def test_budget_saturates_at_cap_without_overshoot():
+    """预算是"增长到封顶后饱和"，不是无限增长。
 
-    否则会出现"单次通道预算不够、又还没到分片阈值"的必失败区间 ——
-    这种区间在测试里很难发现，但在线上就是"某些长度的视频必然失败"。
+    ⚠️ 这条测试**替换掉了**我原先写的
+    `test_cap_kicks_in_before_chunking_threshold`。原来那条断言
+    「封顶必须早于分片阈值」，理由是"否则会出现预算不够的必失败区间"——
+    **理由是错的**：预算不够不会失败，只是让模型写得少一点。
+    真正的失败模式是反过来的（预算小于模型自然想写的量 → 截断 → JSON 不完整）。
+    详见 `test_single_pass_range_budget_exceeds_observed_need`。
     """
-    from vd.summarize import CLIENT_MAX_TOKENS, DEFAULT_HEADROOM
+    from vd.summarize import DEFAULT_HEADROOM
 
     linear_end = (CLIENT_MAX_TOKENS - 1024) / (OUT_RATIO * DEFAULT_HEADROOM)
-    assert linear_end < 60_000, (
-        f"线性段到 {linear_end:,.0f} 字才封顶，晚于 60,000 字的分片阈值"
-    )
-    # 封顶点附近两边都要有定义
-    assert output_budget(int(linear_end) - 1000) < CLIENT_MAX_TOKENS
-    assert output_budget(int(linear_end) + 1000) == CLIENT_MAX_TOKENS
+    # 封顶点之前线性增长
+    assert output_budget(int(linear_end) - 10_000) < CLIENT_MAX_TOKENS
+    # 封顶点之后饱和，且**不越界**（越界会被服务端 400 拒绝）
+    assert output_budget(int(linear_end) + 10_000) == CLIENT_MAX_TOKENS
+    assert output_budget(10**7) == CLIENT_MAX_TOKENS
+    # 单调不减
+    prev = 0
+    for c in range(0, 200_000, 5_000):
+        cur = output_budget(c)
+        assert cur >= prev, f"{c} 字处预算反而变小了"
+        prev = cur
 
 
 def test_output_budget_scales_with_input():
@@ -853,12 +872,43 @@ def test_output_budget_scales_with_input():
 
 
 def test_output_budget_respects_limits():
-    """预算要落在服务端合法区间内，并且有自己的封顶。"""
+    """预算要落在服务端合法区间内，且不越界。"""
     assert output_budget(1) >= 4096, "太小会让模型没空间写"
     assert output_budget(10**7) == CLIENT_MAX_TOKENS, "必须有封顶"
     assert CLIENT_MAX_TOKENS <= API_MAX_TOKENS, "客户端封顶不应超过服务端上限"
-    # 封顶只影响 max_tokens（上限），不影响实际计费 —— 所以可以给得宽裕
-    assert output_budget(10**7) < API_MAX_TOKENS, "没必要贴着服务端上限要"
+    # 封顶就取服务端上限：`max_tokens` 只截断、不诱导，
+    # 设大没有坏处（只付实际生成的 token）。详见 CLIENT_MAX_TOKENS 的注释。
+    assert CLIENT_MAX_TOKENS == API_MAX_TOKENS
+    # 预算永远不该越界，否则服务端直接 400
+    for chars in (0, 1, 1_000, 60_000, 200_000, 10**7):
+        assert 1 <= output_budget(chars) <= API_MAX_TOKENS
+
+
+def test_single_pass_range_budget_exceeds_observed_need():
+    """**真正的不变量**：单次通道能处理的输入，预算必须够。
+
+    这里记录的是一次**推理反转**。我原先写的断言是
+    「封顶必须早于分片阈值」，理由是"否则会出现预算不够的必失败区间"——
+    这个理由是错的：预算不够并不会失败，只是让模型写得少一点。
+
+    真正的失败模式是**反过来的**：预算**小于模型自然想写的量**时，
+    响应被截断、JSON 不完整、任务失败（BV1Q3pe6GERF 就这样失败过两次，
+    12692 字实际需要 21490 tok，而当时上限只有 8192）。
+
+    所以正确的断言是"预算 ≥ 实测需求"，而不是"封顶要早"。
+    """
+    from vd.summarize import DEFAULT_HEADROOM
+
+    worst_need_ratio = 1.693          # 实测最坏 输出/输入
+    for chars in (5_000, 12_692, 30_000, 60_000):
+        need = chars * worst_need_ratio
+        budget = output_budget(chars)
+        assert budget >= need, (
+            f"{chars} 字需要约 {need:,.0f} tok，预算只有 {budget:,} —— 会截断"
+        )
+    # 封顶处不能无限膨胀
+    assert output_budget(60_000) <= CLIENT_MAX_TOKENS
+    assert DEFAULT_HEADROOM >= 1.693, "余量低于实测最坏比例就必然截断"
 
 
 def test_repair_unescaped_quotes_fixes_real_failure():

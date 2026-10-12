@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import sys
 import tempfile
@@ -143,9 +144,13 @@ def main() -> int:
         data = client.get(f"/tasks/{task_id}/json").json()
         assert data["status"] == "done", f"任务失败：{data.get('error')}"
         res = data["result"]
+        # 用 .get() 而不是 []：payload 的字段会随实现演进，
+        # 缺一个字段不该让整条验收崩在 KeyError 上（曾因 anchored_points
+        # 被移除而误判为"任务失败"——其实任务好好的）。
         check("任务完成", lambda: (
-            f"{res['points']} 条要点（{res['anchored_points']} 条带锚点）/ "
-            f"{res['chars']} 字 / ¥{res['cost_cny']} / 路线 {res['transcript_source']}"
+            f"{res.get('points')} 条要点（{res.get('anchored_points', '—')} 条带锚点）/ "
+            f"{res.get('chars')} 字 / ¥{res.get('cost_cny')} / "
+            f"路线 {res.get('transcript_source')}"
         ))
 
         print("\n【4】产物与下载")
@@ -178,9 +183,19 @@ def main() -> int:
         check("产物含免责声明", lambda: (
             "请勿转载" in md or (_ for _ in ()).throw(AssertionError("缺声明"))
         ) and "已包含")
-        check("要点带时间戳锚点", lambda: (
-            md.count("[0") >= 3 or (_ for _ in ()).throw(AssertionError("锚点太少"))
-        ) and f"{md.count('[0')} 处时间戳")
+
+        # 设计变更（2026）：产物**不再带时间戳锚点**。
+        # 理由：时间戳占 prompt 的 58%（实测 19,193 → 8,108 token），
+        # 而产物本身就是总结、不需要跳回原视频。详见 vd/summarize.py 的模块说明。
+        check("产物不含时间戳（设计如此）", lambda: (
+            not re.search(r"\[\d{2}:\d{2}:\d{2}\]", md)
+            or (_ for _ in ()).throw(AssertionError("又带上时间戳了"))
+        ) and "确认无时间戳")
+
+        check("产物结构完整", lambda: (
+            all(sec in md for sec in ("## 速览", "## 总结", "## 要点"))
+            or (_ for _ in ()).throw(AssertionError("缺少章节"))
+        ) and "速览/总结/要点 齐全")
 
         print("\n【7】免责声明页面渲染")
         h = web._disclaimer_html()

@@ -1,13 +1,34 @@
-"""P2 总结层：逐字稿 → 总结 + 要点（带时间戳锚点）。
+"""P2 总结层：逐字稿 → 总结 + 要点。
 
-## 方案 §5.2② 的硬要求
+## 为什么**不做**时间戳锚点（2026 设计变更，推翻早前方案）
 
-> 逐字稿要带时间戳锚点。总结与要点里**每条结论都要能点回原视频位置**。
-> 这不只是体验问题 —— 它决定了产物能否被信任和复用。
+早前按方案 §5.2② 要求"每条结论都能点回原视频位置"，做法是把带
+`[HH:MM:SS]` 的逐字稿喂给模型、让它为每条要点标注锚点，再本地校验锚点真实存在。
 
-所以本模块不产出"一段漂亮但无法追溯的散文"，而是要求模型为每条要点
-标注它依据的时间戳，并在**本地校验锚点真实存在**（见 `validate_points`）。
-模型编一个不存在的时间戳会被直接丢掉，而不是写进产物。
+**这条路线已被移除**，原因是实测出的代价与收益不成比例：
+
+| 项 | 实测值 |
+| --- | --- |
+| 带时间戳的 prompt | 19,193 token |
+| 不带时间戳的 prompt | 8,108 token |
+| **省下** | **11,085 token（58%）** |
+
+时间戳占了输入的一半以上 —— 因为每一段都要渲染一个 `[HH:MM:SS]`，
+而一段往往只有一句话。去掉它，输入 token 直接砍半。
+
+而收益侧很有限：**产物本身就是总结**，用户读总结就好，不必再跳回原视频
+逐条核对。所以"每条结论能点回原视频"这个能力，实际很少被用到。
+
+结论：**去掉时间戳，换掉一半的输入成本**。这也让
+`render_for_prompt(with_timestamps=False)` 成为默认路径。
+
+## 遗留影响（改动留下的痕迹，写清楚免得后人困惑）
+
+· `KeyPoint.anchors` / `TimelinePoint.at` 等字段**保留但不再使用** ——
+  删掉它们会牵动产物格式与缓存，收益不大；
+· `validate_points` 不再做锚点校验，只做"内容非空"过滤；
+· `parse_ts` / `anchor_labels` / `match_highlights_to_points` 已无调用方，
+  标记为 deprecated。
 
 ## 单次 vs map-reduce：先用实测数字决定
 
@@ -28,7 +49,9 @@ DeepSeek **默认开启思考模式且 effort=high**。开着的后果：
 - 思考内容会吃掉 `max_tokens`，小 `max_tokens` 下直接返回空 content；
 - 我们做的是"抽取+压缩"，不是难题推理，思考的收益很低。
 
-所以这里默认显式关闭：`extra_body={"thinking": {"type": "disabled"}}`。
+所以这里默认显式关闭 —— 见 `thinking_body()`，
+可用 `DEEPSEEK_THINKING=enabled` 打开做对比（**开了要相应增大 max_tokens**，
+否则思考内容会把输出预算吃光，返回空 content）。
 """
 
 from __future__ import annotations
@@ -375,15 +398,29 @@ OUT_RATIO = 1.0
 #   "the valid range of max_tokens is [1, 393216]"
 API_MAX_TOKENS = 393216
 
-# 我们自己的封顶。设它有**两个**理由，都不只是"怕花钱"：
-#   1. 真要 39 万 token 的输出，这个任务早该走 map-reduce 分片，而不是让
-#      单次调用吐一篇论文 —— 单次输出过长时质量会明显下滑（后半段敷衍）。
-#   2. 费用与耗时都要有已知上界。
+# 我们的封顶 = 服务端上限。
 #
-# 注意：这个封顶生效的输入长度必须**早于** `single_pass_chars`（分片阈值），
-# 否则会出现"单次通道预算不够、又还没到分片阈值"的必失败区间。
-# 当前 headroom=2.0 时封顶于 32,256 字，早于 60,000 字的分片阈值，安全。
-CLIENT_MAX_TOKENS = 65536
+# ## 为什么提到服务端上限（用户要求，且我之前的一个反对理由是错的）
+#
+# 我原先设 65536，理由是"单次输出过长时质量下滑"。但**这个理由站不住**：
+# 实测同一 prompt 只改 max_tokens（2000/8000/32000/65536），
+# 自然结束时的输出量分别是 3038/3157/2792 —— **输出量与上限无关**。
+# `max_tokens` 只是 `min()` 的第二个参数：它只会**截断**，不会**诱导**。
+# 所以"上限设大导致模型多写"不成立；真出现超长输出是模型自己的选择，
+# 那时让它写完（而不是截断）反而更好。
+#
+# 另外实测过分段质量（前/中/后 1/3 的锚点率与 insight 率）：
+# 单次全文全程 100%/100%，后段陈述字数还更长（263→315→346）——
+# "后半段敷衍"在我测过的规模内**不成立**。
+#
+# ## 代价（如实记录）
+#
+# 提到上限后，"分片阈值 `single_pass_chars`"成为单次通道的**真正**约束。
+# 也就是说：一个 6 万字以内的视频，现在可以拿到 39 万 token 的输出预算。
+# 这**不会**增加常规费用（只付实际生成），但理论上一次超长输出的费用上界变高了。
+# 未被验证的范围：我测过的自然输出最长约 32.5k token；
+# 更大规模（几十万 token 单次输出）的质量**没有实测**，不作保证。
+CLIENT_MAX_TOKENS = API_MAX_TOKENS
 
 # 余量系数。取值依据（实测，见 `scripts/_check_headroom.py` 的推导）：
 #   最坏观测比例 1.693 -> 1.5 不够（本次就超了 7%，靠重试才过）；
@@ -448,6 +485,33 @@ def sanitize_no_proxy() -> list[str]:
     return dropped
 
 
+def thinking_body() -> dict:
+    """构造 `extra_body`，决定是否开启思考模式。
+
+    ## 默认关闭（实测结论）
+
+    DeepSeek 默认开启思考且 `effort=high`，而思考内容**会占用 `max_tokens`**：
+    输出预算小的时候，思考把预算吃光，`content` 直接返回空字符串。
+
+    我们做的是"抽取 + 压缩"而不是难题推理，思考收益很低，所以默认关闭。
+
+    ## 为什么做成可配置
+
+    原先这里是硬编码的 `{"thinking": {"type": "disabled"}}`，
+    但 `.env.example` 里却写了 `DEEPSEEK_THINKING=disabled` ——
+    **配了不生效**，比没有这个变量更糟（用户以为调过了）。
+
+    现在两者一致了：设 `DEEPSEEK_THINKING=enabled` 真的会打开。
+
+    ⚠️ 打开时要**相应调大输出预算**，否则会得到空 content。
+    预算由 `output_budget()` 计算，它会因为思考内容而低估。
+    """
+    raw = os.getenv("DEEPSEEK_THINKING", "disabled").strip().lower()
+    if raw in ("enabled", "on", "true", "1", "yes"):
+        return {"thinking": {"type": "enabled"}}
+    return {"thinking": {"type": "disabled"}}
+
+
 class DeepSeekClient:
     """极薄的封装。存在的意义是把"必须关思考模式"和"必须重试空 content"固化下来。"""
 
@@ -488,8 +552,10 @@ class DeepSeekClient:
                     response_format={"type": "json_object"},
                     max_tokens=max_tokens,
                     # 思考模式默认开启且 effort=high，会吃掉 max_tokens。
-                    # 我们做的是抽取压缩而非难题推理，显式关闭更省更稳。
-                    extra_body={"thinking": {"type": "disabled"}},
+                    # 我们做的是抽取压缩而非难题推理，默认关闭更省更稳。
+                    # 但**做成可配置**：万一某类视频（如专业分析）需要
+                    # 更强推理，可以打开它对比效果。
+                    extra_body=thinking_body(),
                 )
             except Exception as exc:  # noqa: BLE001
                 last_err = exc
@@ -594,8 +660,21 @@ def chunk_segments(
     return chunks
 
 
-def render_for_prompt(segments: list[Segment], with_timestamps: bool = True) -> str:
-    """渲染成带时间戳的文本，让模型能引用位置。"""
+def render_for_prompt(segments: list[Segment], with_timestamps: bool = False) -> str:
+    """把逐字稿渲染成喂给模型的文本。
+
+    ⚠️ 默认 `with_timestamps=False`（2026 设计变更）。
+
+    时间戳占 prompt 的 **58%**（实测 19,193 → 8,108 token），
+    而产物本身就是总结、不需要跳回原视频，所以默认不带。
+
+    保留这个开关是为了：
+      · 让测试能对比两种渲染的 token 差（`scripts/measure_ts_savings.py`）；
+      · 万一以后要恢复锚点能力，改动面小。
+
+    但**默认值必须是 False** —— 否则一个不传参的调用点就会
+    悄悄把输入成本翻倍，而且行为上看不出来。
+    """
     if not with_timestamps:
         return "".join(s.text for s in segments)
     return "\n".join(f"[{ts(s.start)}] {s.text}" for s in segments)
@@ -604,20 +683,19 @@ def render_for_prompt(segments: list[Segment], with_timestamps: bool = True) -> 
 # ---------------------------------------------------------------- Prompt
 
 
-SYSTEM_SINGLE = """你是一个严谨的中文视频内容分析师。用户会给你一份带时间戳的逐字稿。
+SYSTEM_SINGLE = """你是一个严谨的中文视频内容分析师。用户会给你一份逐字稿。
 
-你的任务：产出速览、脉络总结、关键时间轴与**详细要点**。**必须输出 JSON**，格式如下（严格遵守字段名）：
+你的任务：产出速览、脉络总结、关键节点与**详细要点**。**必须输出 JSON**，格式如下（严格遵守字段名）：
 
 {
   "tl_dr": "一句话说清这个视频讲了什么，控制在 60 字以内",
   "overall": "对整体内容的脉络总结，3-6 句，说清讲了什么、脉络如何、结论是什么",
   "highlights": [
-    {"at": "00:01:41", "text": "错失 DOTA，冰蛙被 Valve 招走"}
+    {"text": "错失 DOTA，冰蛙被 Valve 招走"}
   ],
   "key_points": [
     {"point": "这一段的主题，10-16 字的短语（会作为小标题）",
      "text": "**详细陈述**：把这一段的价值信息完整讲清楚，可以多句",
-     "anchors": ["00:01:41", "00:02:11"],
      "category": "事实",
      "insight": "一句话点出这一层的含义（≤25 字，不要复述内容）"}
   ]
@@ -640,18 +718,17 @@ SYSTEM_SINGLE = """你是一个严谨的中文视频内容分析师。用户会�
    `point` 是这一段的主题（10-16 字），`text` 是这一段的完整陈述。
 5. 顺序**按视频时间顺序**，条数 6-15 条（宁可充分，不要压缩）。
 6. `category` 只能取：结论 / 论据 / 方法 / 事实 / 行动项。
-7. `anchors` **必须来自逐字稿里真实出现过的时间戳**（HH:MM:SS），可多条。
-8. **人称要准确**：不要把"游戏""视频""项目"写成"他/她"。指代不明时重复名词。
-9. 全部用中文。
+7. **人称要准确**：不要把"游戏""视频""项目"写成"他/她"。指代不明时重复名词。
+8. 全部用中文。
 
 ## highlights 的定位
 
 5-10 个**转折点/里程碑**，`text` ≤20 字，只写"发生了什么"。
-用途是让人 5 秒内决定跳到哪一段看，**宁可少而准**。
-`at` 必须是真实时间戳，且按时间升序。
+用途是让人快速扫读视频脉络，**宁可少而准**。
+按视频中的先后顺序排列。
 """
 
-SYSTEM_MAP = """你是一个严谨的中文视频内容分析师。用户会给你一份**带时间戳的逐字稿片段**
+SYSTEM_MAP = """你是一个严谨的中文视频内容分析师。用户会给你一份**逐字稿片段**
 （这是长视频的一部分，不是全部）。
 
 你的任务：把这一片段转为**精炼陈述**。**必须输出 JSON**，格式如下（严格遵守字段名）：
@@ -660,7 +737,6 @@ SYSTEM_MAP = """你是一个严谨的中文视频内容分析师。用户会给�
   "points": [
     {"point": "本段主题，10-16 字",
      "text": "本段的完整陈述：去掉废话，但**不丢任何有价值的信息**",
-     "anchors": ["00:12:30"],
      "category": "论据",
      "insight": "一句话点出含义（≤25 字）"}
   ]
@@ -669,27 +745,25 @@ SYSTEM_MAP = """你是一个严谨的中文视频内容分析师。用户会给�
 硬性规则：
 1. **去废话、取精华，但不漏信息**：数字、时间、人名、因果、结论、例外都要保留。
 2. `insight` 是**一句话总结**（≤25 字），点出含义，不要复述、不要展开成多句。
-3. anchors **必须来自本片段里真实出现过的时间戳**，格式 HH:MM:SS。
-4. category 只能取：结论 / 论据 / 方法 / 事实 / 行动项。
-5. 只依据片段内容，不要推测片段之外的内容。
-6. **人称要准确**：不要把"游戏""视频""项目"写成"他/她"。
-7. 全部用中文。"""
+3. category 只能取：结论 / 论据 / 方法 / 事实 / 行动项。
+4. 只依据片段内容，不要推测片段之外的内容。
+5. **人称要准确**：不要把"游戏""视频""项目"写成"他/她"。
+6. 全部用中文。"""
 
 SYSTEM_REDUCE = """你是一个严谨的中文视频内容分析师。用户会给你一份**分段要点清单**
-（来自同一个长视频的不同片段，每条都带原始时间戳）。
+（来自同一个长视频的不同片段）。
 
-你的任务：合并成速览、脉络总结、关键时间轴与**详细要点**。**必须输出 JSON**，格式如下：
+你的任务：合并成速览、脉络总结、关键节点与**详细要点**。**必须输出 JSON**，格式如下：
 
 {
   "tl_dr": "一句话说清这个视频讲了什么，≤60 字",
   "overall": "对整体内容的脉络总结，3-6 句",
   "highlights": [
-    {"at": "00:12:30", "text": "转折点短语，≤20 字"}
+    {"text": "转折点短语，≤20 字"}
   ],
   "key_points": [
     {"point": "主题短语，10-16 字",
      "text": "详细陈述：合并同一话题的内容，去废话但不丢信息",
-     "anchors": ["00:12:30"],
      "category": "结论",
      "insight": "一句话点出含义（≤25 字）"}
   ]
@@ -706,10 +780,9 @@ SYSTEM_REDUCE = """你是一个严谨的中文视频内容分析师。用户会�
    **不要复述 text、不要写"补充："前缀、不要展开成多句。**
    没有可写的一句话含义时就留空字符串。
 6. category 只能取：结论 / 论据 / 方法 / 事实 / 行动项。
-7. anchors **必须原样沿用输入里出现过的时间戳**，不要新增或改写格式。
-8. **highlights** 选 5-10 个转折点，`text` ≤20 字，`at` 原样沿用输入的时间戳，升序。
-9. **人称要准确**：不要把"游戏""视频""项目"写成"他/她"。
-10. 全部用中文。"""
+7. **highlights** 选 5-10 个转折点，`text` ≤20 字，按视频中的先后顺序排列。
+8. **人称要准确**：不要把"游戏""视频""项目"写成"他/她"。
+9. 全部用中文。"""
 
 
 # ---------------------------------------------------------------- 锚点校验
@@ -732,42 +805,24 @@ def parse_ts(label: str) -> float | None:
 def validate_points(
     raw_points: list[dict], segments: list[Segment], tolerance: float = 2.0
 ) -> tuple[list[KeyPoint], int]:
-    """校验锚点是否真实存在。
+    """校验要点文本。
 
-    做法：把模型给的时间戳去和逐字稿里真实出现过的 segment 起始时间比对，
-    允许 `tolerance` 秒误差（模型可能取整）。**对不上的锚点直接丢掉**；
-    如果一条要点所有锚点都对不上，就标注它并保留文本但清空锚点 ——
-    宁可让用户看到"这条没有出处"，也不要给一个假的位置。
+    去掉时间戳后，不再做锚点真实性校验 —— 模型不输出 anchors。
+    `segments` 与 `tolerance` 参数保留仅为向后兼容调用签名，当前不再使用。
+    只过滤空文本要点，并解析 text / category / topic / insight 字段。
 
     Returns:
-        (校验后的要点, 被丢弃的锚点条数)
+        (校验后的要点, 被丢弃的锚点数，恒为 0)
     """
-    valid_starts = [s.start for s in segments]
     out: list[KeyPoint] = []
-    dropped_anchors = 0
     for p in raw_points:
         text = (p.get("text") or "").strip()
         if not text:
             continue
-        anchors: list[float] = []
-        for label in p.get("anchors") or []:
-            sec = parse_ts(label)
-            if sec is None:
-                dropped_anchors += 1
-                continue
-            # 找最近的真实时间戳
-            if not valid_starts:
-                break
-            nearest = min(valid_starts, key=lambda v: abs(v - sec))
-            if abs(nearest - sec) <= tolerance:
-                if nearest not in anchors:
-                    anchors.append(nearest)
-            else:
-                dropped_anchors += 1
         out.append(
             KeyPoint(
                 text=text,
-                anchors=sorted(anchors),
+                anchors=[],  # 不再使用锚点
                 category=(p.get("category") or "").strip(),
                 # 兼容模型偶尔改口用的字段名，避免因此丢掉主题/补充说明
                 topic=(p.get("point") or p.get("topic") or p.get("title") or "").strip(),
@@ -775,7 +830,7 @@ def validate_points(
                 insight=_trim_insight(p.get("insight") or p.get("note") or ""),
             )
         )
-    return out, dropped_anchors
+    return out, 0
 
 
 def match_highlights_to_points(
@@ -874,37 +929,26 @@ def normalize_highlights(
     *,
     max_items: int = MAX_HIGHLIGHTS,
 ) -> tuple[list[TimelinePoint], int]:
-    """校验并归一化关键时间轴。
+    """校验并归一化关键节点（原"时间轴"，已去掉时间戳）。
 
-    与 `validate_points` 同样的原则：**模型编造的时间戳必须被丢掉**。
-    但这里多一条：**必须按时间升序**，且条数有上限 ——
-    时间轴的用途是"5 秒内决定跳到哪看"，十几条无序列就不是时间轴了。
-
-    时间点的合法性判定比要点宽松一点：它只需落在 [0, 视频时长+容差] 区间内，
-    不必精确命中某个 segment 的起点 —— 因为"跳到某一刻"本来就允许几秒偏差。
+    去掉时间戳后，highlights 退化为"转折点短语列表"，只校验文本内容与条数上限。
+    `info` 参数保留是为了向后兼容调用签名，当前不再使用。
 
     Returns:
-        (时间轴, 被丢弃的条数)
+        (节点列表, 被丢弃的条数)
     """
-    duration = float(getattr(info, "duration", 0) or 0)
     out: list[TimelinePoint] = []
     dropped = 0
     for item in raw:
         text = (item.get("text") or "").strip()
-        at_raw = item.get("at") or item.get("time") or ""
-        sec = parse_ts(at_raw)
-        if not text or sec is None:
-            dropped += 1
-            continue
-        if sec < 0 or (duration and sec > duration + 30):
-            # 超出视频范围 ±30 秒 → 编造
+        if not text:
             dropped += 1
             continue
         if len(text) > MAX_HIGHLIGHT_CHARS:
             text = text[:MAX_HIGHLIGHT_CHARS].rstrip("，。、 ") + "…"
-        out.append(TimelinePoint(at=float(sec), text=text))
+        # at / point_index 字段保留但不再使用（无时间戳，不做要点关联）
+        out.append(TimelinePoint(at=0.0, text=text))
 
-    out.sort(key=lambda p: p.at)           # 强制升序
     if len(out) > max_items:
         dropped += len(out) - max_items
         out = out[:max_items]
@@ -966,9 +1010,11 @@ def summarize(
 
     if chosen is Strategy.SINGLE:
         say(f"单次总结（全文 {total_chars} 字）")
+        # 发给大模型的逐字稿不带时间戳：用户不看原视频，时间戳无意义，
+        # 且会占据大量 token、增加成本。
         user = (
-            f"标题：{transcript.title}\n\n带时间戳的逐字稿：\n"
-            f"{render_for_prompt(segments)}"
+            f"标题：{transcript.title}\n\n逐字稿：\n"
+            f"{render_for_prompt(segments, with_timestamps=False)}"
         )
         data, u = client.json_call(
             SYSTEM_SINGLE, user, max_tokens=output_budget(total_chars)
@@ -986,10 +1032,11 @@ def summarize(
         merged_raw: list[dict] = []
         for i, chunk in enumerate(chunks, 1):
             say(f"  第 {i}/{len(chunks)} 片：{ts(chunk[0].start)} - {ts(chunk[-1].end)}")
+            # 分片同样不带时间戳，与单次通道保持一致
             user = (
                 f"标题：{transcript.title}\n"
-                f"这是第 {i}/{len(chunks)} 片（覆盖 {ts(chunk[0].start)} - {ts(chunk[-1].end)}）\n\n"
-                f"带时间戳的逐字稿片段：\n{render_for_prompt(chunk)}"
+                f"这是第 {i}/{len(chunks)} 片\n\n"
+                f"逐字稿片段：\n{render_for_prompt(chunk, with_timestamps=False)}"
             )
             data, u = client.json_call(
                 SYSTEM_MAP, user, max_tokens=output_budget(len(render_for_prompt(chunk)))
@@ -1001,8 +1048,7 @@ def summarize(
             raise SummarizeError("分片阶段没有产出任何要点")
         say(f"合并 {len(merged_raw)} 条分段要点")
         listing = "\n".join(
-            f"- [{p.get('category', '')}] {p.get('text', '')} "
-            f"(anchors: {', '.join(p.get('anchors') or [])})"
+            f"- [{p.get('category', '')}] {p.get('text', '')}"
             for p in merged_raw
         )
         user = (
@@ -1022,18 +1068,9 @@ def summarize(
         )
 
     _check_summary(overall, points, transcript.bvid)
-    match_highlights_to_points(highlights, points)
 
-    if dropped:
-        notes.append(f"锚点校验丢弃 {dropped} 个无法对应到逐字稿的时间戳")
     if dropped_hl:
-        notes.append(f"时间轴丢弃 {dropped_hl} 条无效或超量条目")
-    unmatched = sum(1 for h in highlights if h.point_index < 0)
-    if unmatched:
-        notes.append(f"{unmatched} 个时间轴节点未能关联到要点（点击不会跳转）")
-    no_anchor = sum(1 for p in points if not p.anchors)
-    if no_anchor:
-        notes.append(f"{no_anchor} 条要点没有可靠出处（模型未给出有效时间戳）")
+        notes.append(f"关键节点丢弃 {dropped_hl} 条无效或超量条目")
     if usage.truncated:
         # 不隐瞒：抢救出来的结果**缺了尾部内容**，使用者有权知道。
         # 这条要足够醒目 —— 产物会被当作可信记录反复引用。
@@ -1156,40 +1193,36 @@ def _clean_insight(text: str) -> str:
 
 
 def _timeline_md(s: Summary) -> list[str]:
-    """Markdown 里的关键时间轴：箭头图 + 图例。
+    """关键节点列表（原"时间轴"，已去掉时间戳与跳转）。
 
-    与 Web 端**保持一致**：图例只做两件事 —— 跳到下方要点、什么都不跳。
-    **不在这里提供"跳视频"**：按用户要求，跳原视频的动作统一放在要点段落的时间戳上。
-    （第一版这里还带着跳视频链接，与 Web 端不一致 —— 同一份产物在两个地方
-     行为不同，是典型的"两套排版各写一遍"漂移。）
+    去掉时间戳后，highlights 退化为"转折点短语列表"，仅用于快速扫读视频脉络。
     """
     hs = getattr(s, "highlights", None) or []
     if not hs:
         return []
-    out = ["## 关键时间轴", "", "```", _ascii_arrow(hs), "```", ""]
+    out = ["## 关键节点", ""]
     for i, h in enumerate(hs, 1):
-        idx = getattr(h, "point_index", -1)
-        goto = f"[↓ 跳到要点 {idx + 1}](#{idx + 1}-)" if idx >= 0 else "_未关联要点_"
-        out.append(f"{i}. `{h.label}` {h.text}　{goto}")
+        out.append(f"{i}. {h.text}")
+    out.append("")
     return out
 
 
 def to_markdown(s: Summary) -> str:
     """渲染总结产物。
 
-    结构（2026 第二次改版，起因是用户对**内容定位**的反馈）：
+    结构（去掉时间戳后）：
 
         # 标题
         > 声明 + 一行元信息
         ## 速览              ← 一眼知道值不值得看
         ## 总结              ← 脉络，按句换行
-        ## 关键时间轴         ← 箭头图 + 图例（跳视频 / 跳要点）
+        ## 关键节点           ← 转折点短语列表，快速扫读脉络
         ## 要点              ← **分段精炼陈述**，不是摘要
         ### 生成记录
 
-    「要点」的定位在用户反馈后变了：**它不是摘要，是分段精炼陈述**——
+    「要点」的定位：**它不是摘要，是分段精炼陈述**——
     去废话但不丢信息、可显式加补充理解，目标是"只读这一节就够，不必再看视频"。
-    因此这里改成每条一个 `###` 小节（带主题标题），而不是一句话的列表项。
+    因此这里每条一个 `###` 小节（带主题标题），而不是一句话的列表项。
     """
     from .disclaimer import artifact_header
 
@@ -1232,14 +1265,6 @@ def to_markdown(s: Summary) -> str:
             lines += [para, ""]
         if p.insight:
             lines += [f"> 💡 **补充理解**：{_clean_insight(p.insight)}", ""]
-        if p.anchors:
-            anchors = " ".join(
-                f"[{ts(a)}](https://www.bilibili.com/video/{s.bvid}?t={int(a)})"
-                for a in p.anchors
-            )
-            lines += [f"<sub>▶ 出处：{anchors}</sub>", ""]
-        else:
-            lines += ["<sub>⚠️ 无可靠出处</sub>", ""]
 
     if s.notes:
         lines += ["---", "", "### 生成记录", ""]

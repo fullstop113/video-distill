@@ -957,100 +957,40 @@ def _done_task_html(client):
     tstore.finish(t.id, result={
         "title": "测试视频", "duration": 1749,
         "transcript_source": "B 站站内字幕", "uses_gpu": False,
-        "chars": 9074, "segments": 822, "points": 3, "anchored_points": 2,
+        "chars": 9074, "segments": 822, "points": 3,
         "strategy": "single", "cost_cny": 0.0482,
         "transcript_file": "x.md", "summary_file": "y.md",
         "tl_dr": "一句话速览内容。",
         "overall": "第一句总结。第二句总结。",
+        # 关键节点只保留文字（已去掉时间戳与跳转）
         "highlights": [
-            {"at": "00:01:41", "sec": 101, "text": "错失 DOTA", "point_index": 0},
-            {"at": "00:13:31", "sec": 811, "text": "HGC 取消", "point_index": 1},
+            {"text": "错失 DOTA"},
+            {"text": "HGC 取消"},
         ],
         "key_points": [
             {"topic": "错失 DOTA", "text": "详细陈述内容。", "insight": "补充说明内容",
-             "category": "事实", "anchors": ["00:01:41"]},
+             "category": "事实"},
             {"topic": "电竞崩盘", "text": "HGC 取消经过。", "insight": "",
-             "category": "结论", "anchors": ["00:13:31"]},
+             "category": "结论"},
         ],
     })
     return client.get(f"/tasks/{t.id}").text
 
 
-def test_result_page_has_arrow_timeline(client, tmp_path, monkeypatch):
+def test_result_page_has_key_nodes(client, tmp_path, monkeypatch):
+    """关键节点以编号列表展示（原时间轴已去掉时间戳与跳转）。"""
     html = _done_task_html(client)
-    assert 'class="tl-axis"' in html
-    assert 'class="tl-node"' in html
-    assert 'class="tl-bubble"' in html
-    assert "tl-bubble-layer" in html
-
-
-def test_bubble_layer_is_outside_scroll_container(client, tmp_path, monkeypatch):
-    """**遮挡修复的核心**：气泡必须挂在滚动容器**之外**。
-
-    实测问题（用户截图）：气泡放在 `.tl-scroll`（overflow-x:auto）里面，
-    于是被裁掉、还被卡片的 backdrop-filter 压暗。
-    **overflow 容器无法让子元素溢出显示**，所以只能分层。
-    """
-    html = _done_task_html(client)
-    # ⚠️ 必须在**时间轴卡片内部**判断，不能拿整页取索引：
-    # 整页里样式表、其它段落都可能出现这些类名，索引会互相干扰（踩过）。
-    start = html.index('<div class="card tl-card">')
-    card = html[start : html.index('<div class="tl-hint">', start)]
-
-    i_layer = card.index('<div class="tl-bubble-layer">')
-    i_scroll = card.index('<div class="tl-scroll">')
-    i_bubble = card.index('<div class="tl-bubble"')
-    assert i_layer < i_bubble < i_scroll, "气泡层应独立于滚动容器（且包含气泡）"
-    # 关键：滚动容器里只有轴线与节点，不能有气泡
-    scroll_inner = card[i_scroll:]
-    assert "tl-bubble" not in scroll_inner, "气泡仍嵌在滚动容器内，会被裁掉"
-    assert '<div class="tl-axis">' in scroll_inner
-    assert ".tl-bubble-layer { position:absolute; inset:0; pointer-events:none" in html
-    # 卡片不能用 backdrop-filter（会创建层叠上下文把气泡压暗）。
-    # 注意 CSS 注释里**提到了**这个词作为反面教材，所以要检查"实际声明"而不是"文中出现"
-    assert "backdrop-filter:" not in html, "卡片仍在用 backdrop-filter，会压暗气泡"
-
-
-def test_timeline_node_is_button_and_clickable(client, tmp_path, monkeypatch):
-    """节点本身可点、可键盘触发 —— 用户要求"点这个点或文字就能跳"。
-
-    用 `<button>` 而不是 `div tabindex`：天然可聚焦、可 Enter/空格触发，
-    语义也更准确（它确实是个按钮）。
-    """
-    html = _done_task_html(client)
-    assert '<button class="tl-node"' in html
-    assert 'data-goto="kp-1"' in html
-    assert "scrollIntoView" in html, "缺少平滑滚动脚本"
-    assert "behavior: 'smooth'" in html
-
-
-def test_timeline_nodes_are_keyboard_focusable(client, tmp_path, monkeypatch):
-    """用 <button> 就不需要 tabindex 了 —— 浏览器默认支持 Tab 聚焦。"""
-    html = _done_task_html(client)
-    assert '<button class="tl-node"' in html
-    assert "addEventListener('focus'" in html or 'addEventListener("focus"' in html
-    assert "keydown" in html
-
-
-def test_timeline_bubble_jumps_to_point_not_video(client, tmp_path, monkeypatch):
-    """按用户要求：**气泡内跳要点，跳视频的动作下移到要点段落**。"""
-    html = _done_task_html(client)
-    bubble = html.split('class="tl-bubble"')[1].split("</div></div>")[0]
-    assert "跳到要点" in bubble
-    assert "bilibili.com" not in bubble, "气泡里不应直接跳视频"
-
-
-def test_timeline_bubble_anchors_have_targets(client, tmp_path, monkeypatch):
-    """气泡链接的 href 必须指向页面里真实存在的 id，否则点了没反应。"""
-    html = _done_task_html(client)
-    hrefs = re.findall(r'href="#(kp-\d+)"', html)
-    ids = set(re.findall(r'id="(kp-\d+)"', html))
-    assert hrefs, "气泡里没有跳转链接"
-    assert not [h for h in hrefs if h not in ids], "存在指向不存在锚点的链接"
+    assert "关键节点" in html
+    assert "<li>错失 DOTA</li>" in html
+    assert "<li>HGC 取消</li>" in html
+    # 不再有时间轴交互元素
+    assert 'class="tl-axis"' not in html
+    assert 'class="tl-node"' not in html
+    assert 'class="tl-bubble"' not in html
 
 
 def test_key_points_are_sections_with_topic(client, tmp_path, monkeypatch):
-    """要点是**分段陈述**：带主题标题、补充说明块、出处链接。"""
+    """要点是**分段陈述**：带主题标题、补充说明块。"""
     html = _done_task_html(client)
     assert 'id="kp-1"' in html and 'id="kp-2"' in html
     assert "错失 DOTA" in html and "电竞崩盘" in html
@@ -1058,68 +998,11 @@ def test_key_points_are_sections_with_topic(client, tmp_path, monkeypatch):
     assert "补充说明内容" in html
 
 
-def test_video_jump_lives_in_point_section(client, tmp_path, monkeypatch):
+def test_result_page_has_no_video_jump(client, tmp_path, monkeypatch):
+    """去掉时间戳后，页面不再有跳原视频的时间戳链接。"""
     html = _done_task_html(client)
-    assert "bilibili.com/video/BV1dFem67EYt?t=101" in html
-    assert "跳原视频" in html
-
-
-def test_timeline_nodes_focus_and_keyboard(client, tmp_path, monkeypatch):
-    """键盘可用：焦点弹泡 + Enter/空格触发跳转。"""
-    html = _done_task_html(client)
-    assert '<button class="tl-node"' in html
-    assert "addEventListener('focus'" in html
-    assert "keydown" in html
-
-
-def test_timeline_caption_is_line_clamped(client, tmp_path, monkeypatch):
-    """节点简介必须**限制为两行**，不能连成一行。
-
-    这个 bug 花了两轮才定位到，最终靠读取**计算样式**才找到真凶：
-
-      `.tl-node .cap` 的 `white-space` 计算值是 **nowrap**（`<button>` 默认为 pre，
-      某些 reset 会给 nowrap，都会被继承），于是
-      `scrollWidth 276 > width 116` —— 文字被压成一行溢出，
-      `-webkit-line-clamp` 完全无从生效。
-
-    所以光写 line-clamp 不够，**必须显式 white-space:normal**。
-    """
-    html = _done_task_html(client)
-    for sel in (".tl-node .dot { display:block",
-                ".tl-node .at { display:block; white-space:normal",
-                ".tl-node .cap { display:-webkit-box"):
-        assert sel in html, f"缺少声明：{sel}"
-    assert "-webkit-line-clamp:2" in html
-    # 关键：简介与时间都要恢复可换行
-    cap_rule = html.split(".tl-node .cap {", 1)[1].split("}", 1)[0]
-    assert "white-space:normal" in cap_rule, "缺 white-space:normal，文字会连成一行"
-    assert "width:100%" in cap_rule, "简介需要有明确宽度才能换行"
-
-
-def test_timeline_node_has_no_background_block(client, tmp_path, monkeypatch):
-    """节点本身不能有背景块 —— 悬停时只放大圆点、提亮文字。
-
-    踩过的坑：第一版给 `.tl-node:hover` 加了 `background` + `border-radius`，
-    结果出现一大块蓝色方块，"覆盖面太大不好看"（用户反馈）。
-    节点应保持无背景，让"轴上有节点"的形状不被破坏。
-    """
-    html = _done_task_html(client)
-    assert ".tl-node { position:relative" in html
-    node_rule = html.split(".tl-node {", 1)[1].split("}", 1)[0]
-    assert "background:none" in node_rule, "节点自身应无背景"
-    # 悬停只放大圆点 + 提高字色，不应出现圆角背景块
-    hover = html.split(".tl-node:hover .dot", 1)[1].split("}", 1)[0]
-    assert "scale(1.2" in hover, "悬停应放大圆点"
-    assert "border-radius" not in hover, "悬停规则里不该有背景块相关声明"
-
-
-def test_no_unlinked_timeline_node_in_practice(client, tmp_path, monkeypatch):
-    """实测产物里曾出现"未关联要点"的节点，点击没反应像坏了。
-
-    现在有最近锚点兜底；这条测试确保界面上不会出现"未关联"字样。
-    """
-    html = _done_task_html(client)
-    assert "未关联要点" not in html
+    assert "bilibili.com/video/BV1dFem67EYt?t=" not in html
+    assert "跳原视频" not in html
 
 
 # ======================================================= 悬浮「到下载」按钮

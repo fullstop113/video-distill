@@ -369,15 +369,15 @@ p, li { font-size:14.5px; }
 .sub { color:var(--mut); font-size:13.5px; margin:0 0 24px; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:14px;
         padding:20px; margin-bottom:16px; }
-/* 卡片统一不用 backdrop-filter：它会创建新层叠上下文，
-   把时间轴的气泡压在下面一层（实测气泡明显发暗）。用不透明背景即可。 */
+/* 卡片统一不用 backdrop-filter：它会创建新的层叠上下文，
+   把浮层压到下面一层去（实测气泡明显发暗）。用不透明背景即可。 */
 .card.soft { background:#15181d; }
 /* 状态徽章等小标签。
    ⚠️ `white-space:nowrap` 是必需的：表格列一窄，"完成"两个字就被拆成两行
    （用户截图指出"失败/完成看着不齐"）。
-   注意这和 `.tl-node .cap` 的坑**正好相反** —— 那边是继承了 nowrap 导致
-   一长串文字不换行，要显式 normal；这边必须禁止换行。
-   同一个属性、两种需求，都得显式写清楚，不能靠继承碰运气。 */
+   这条经验有**反面**：同一个属性在别处可能正好需要 `normal` ——
+   本文件的历史上就有过一处因为继承了 nowrap 导致长文字不换行。
+   同一个属性、两种相反需求，都得**显式**写清楚，不能靠继承碰运气。 */
 .pill { display:inline-block; padding:2px 10px; border-radius:999px;
         font-size:12px; background:#22262e; color:var(--mut);
         border:1px solid var(--line); white-space:nowrap; text-align:center;
@@ -433,78 +433,6 @@ footer { margin-top:36px; color:var(--mut); font-size:13px; }
      width:21px; height:21px; border-radius:50%; background:#22262e;
      border:1px solid var(--line); color:var(--mut); font-size:12px;
      display:flex; align-items:center; justify-content:center; }
-
-/* ============ 关键时间轴：横向箭头 + 气泡节点 ============ */
-/* ⚠️ 这里的关键是 **气泡与滚动容器分层**。
-   第一版把气泡放在 .tl-scroll（overflow-x:auto）里面，
-   于是它被裁掉、还被卡片的 backdrop-filter 盖住 —— 截图里前两个气泡明显发暗。
-   overflow 容器**无法**让子元素溢出显示，所以气泡必须挂在滚动容器之外：
-     .tl-card(.tl-layer 定位层)
-        ├ .tl-bubble-layer  ← 气泡层，不裁剪，跟随节点定位
-        └ .tl-scroll        ← 只负责横向滚动轴线与节点
-   如果不用分层，唯一的选择是 z-index 硬抬，但那样会出现"气泡盖住标题"的新问题。 */
-.tl-card { position:relative; padding:24px 20px 16px; }
-.tl-bubble-layer { position:absolute; inset:0; pointer-events:none; z-index:5; }
-.tl-scroll { overflow-x:auto; padding:34px 2px 6px; scrollbar-width:thin; }
-.tl-scroll::-webkit-scrollbar { height:7px; }
-.tl-scroll::-webkit-scrollbar-thumb { background:#333842; border-radius:4px; }
-.tl-axis { position:relative; display:flex; align-items:flex-start;
-           min-width:max-content; }
-.tl-axis::before { content:""; position:absolute; left:0; right:16px; top:7px;
-                   height:2px; background:linear-gradient(90deg,#2b3038,#4f8cff); }
-.tl-axis::after { content:""; position:absolute; right:4px; top:2px;
-                  border-left:12px solid var(--acc);
-                  border-top:6px solid transparent; border-bottom:6px solid transparent; }
-.tl-node { position:relative; flex:0 0 auto; width:124px; text-align:center;
-           background:none; border:0; padding:0 8px; color:inherit; font:inherit;
-           cursor:pointer; box-sizing:border-box; }
-.tl-node .dot { display:block; width:16px; height:16px; border-radius:50%;
-                background:var(--bg); border:2px solid var(--acc);
-                margin:0 auto;
-                transition:transform .15s, background .15s, box-shadow .15s; }
-/* ⚠️ 三个子元素都必须是 display:block，并且 **white-space:normal**。
-   踩过的坑（查计算样式才定位到）：
-     · 它们是 <span>，默认 inline → 必须显式 block 化；
-     · `<button>` 的默认 white-space 是 pre，浏览器/框架 reset 还可能给 nowrap，
-       两者都会被继承下来 —— 实测 `.cap` 的计算值是 `white-space: nowrap`，
-       `scrollWidth 276 > width 116`，文字被压成一行溢出，
-       `-webkit-line-clamp` 完全无从生效。
-   结论：光写 line-clamp 不够，**必须显式恢复 white-space:normal**。 */
-.tl-node .at { display:block; white-space:normal;
-               font-size:11.5px; color:var(--mut); margin-top:8px;
-               font-family:ui-monospace,Consolas,monospace; }
-.tl-node .cap { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
-                overflow:hidden; white-space:normal; width:100%;
-                font-size:12px; color:#c9ccd1;
-                margin-top:3px; line-height:1.35; transition:color .15s; }
-/* 悬停反馈只加在**圆点与文字**上。
-   第一版给整个 .tl-node 加了 background + border-radius，
-   结果出现一大块蓝色背景（用户截图指出"覆盖面太大不好看"）。
-   节点本身应保持无背景，让"轴上有节点"的形状不被破坏。 */
-.tl-node:hover .dot, .tl-node:focus-visible .dot, .tl-node.active .dot {
-  background:var(--acc); transform:scale(1.28);
-  box-shadow:0 0 0 5px rgba(79,140,255,.16); }
-.tl-node:hover .at, .tl-node.active .at { color:var(--acc); }
-.tl-node:hover .cap, .tl-node:focus-visible .cap, .tl-node.active .cap { color:#fff; }
-/* 气泡本体：由 JS 定位在气泡层内 */
-.tl-bubble { position:absolute; width:288px; background:#1b1f26;
-             border:1px solid #3a414c; border-radius:14px; padding:14px 16px;
-             text-align:left; box-shadow:0 18px 44px rgba(0,0,0,.62);
-             opacity:0; visibility:hidden; transform:translate(-50%,6px);
-             transition:opacity .16s ease, transform .16s ease; }
-.tl-bubble.show { opacity:1; visibility:visible; transform:translate(-50%,0); }
-.tl-bubble .bt { font-size:12px; color:var(--acc); margin-bottom:7px;
-                 font-family:ui-monospace,Consolas,monospace;
-                 display:flex; align-items:center; gap:6px; }
-.tl-bubble .bt b { color:var(--fg); font-family:inherit; font-size:12.5px; }
-.tl-bubble .bx { font-size:13.5px; line-height:1.6; color:#e2e5ea; }
-.tl-bubble .ba { display:flex; gap:8px; margin-top:11px; flex-wrap:wrap; }
-.tl-bubble .ba a, .tl-bubble .ba span { font-size:12px; padding:4px 11px;
-     border-radius:999px; border:1px solid var(--line); background:#12151a; }
-.tl-bubble .ba a:hover { background:#22262e; text-decoration:none; }
-.tl-hint { font-size:12.5px; color:var(--mut); margin-top:10px; }
-.tl-hint kbd { background:#22262e; border:1px solid var(--line); border-radius:5px;
-               padding:1px 6px; font-size:11.5px; font-family:inherit; }
 
 /* ============ 要点：分段陈述 ============ */
 .kp { border-left:2px solid var(--line); padding-left:18px; margin-bottom:30px;
@@ -624,6 +552,7 @@ def _nav(sess: dict | None, current: str = "") -> str:
     items: list[tuple[str, str]] = [
         ("首页", "/"),
         ("我的产物", "/artifacts"),
+        ("余额", "/balance"),
         ("服务状态", "/status"),
         ("配额", "/quota"),
     ]
@@ -986,6 +915,7 @@ def index(request: Request, page: int = 1, status: str = ""):
         <span class="pill">{role}</span></div>
       <div class="kv" style="margin-top:8px"><span class="mut">配额</span>
         <span>{html.escape(q.describe())}</span></div>
+      <div class="kv" style="margin-top:8px">{_balance_badge(sess)}</div>
     </div>
     """
 
@@ -1235,6 +1165,229 @@ def logout(request: Request):
     return resp
 
 
+# ---------------- 余额与邀请码 ----------------
+
+
+def _balance_badge(sess: dict | None) -> str:
+    """首页顶部展示余额。管理员显示"不限"。
+
+    为什么放在首页而不是只放余额页：**用户提交前就该知道余额够不够**。
+    等提交完才告诉他"余额不足"，那一次等待就白费了。
+    """
+    if not sess:
+        return ""
+    from . import billing
+
+    uid = sess["uid"]
+    if billing.is_admin(uid):
+        return ('<span class="kv"><b>余额</b>'
+                '<span class="pill ok">不限（管理员）</span></span>')
+    b = billing.get(uid, sess.get("uname", ""))
+    cls = "ok" if b.balance > 0 else ("warn" if b.balance > -billing.balance_floor()
+                                      else "bad")
+    return (f'<span class="kv"><b>余额</b>'
+            f'<span class="pill {cls}">¥{b.balance:.2f}</span>'
+            f'<a class="small" href="/balance">充值</a></span>')
+
+
+def _invite_rows(uid: str) -> str:
+    """管理员看到的邀请码列表。"""
+    from . import billing
+
+    items = billing.list_invites(uid, limit=30)
+    if not items:
+        return '<div class="empty">还没有生成过邀请码。</div>'
+    tr = []
+    for i in items:
+        cls = {"可用": "ok", "已过期": "warn", "已使用": ""}[i["state"]]
+        tr.append(
+            f"<tr><td><code>{html.escape(i['code'])}</code></td>"
+            f"<td>¥{i['amount']:.2f}</td>"
+            f"<td><span class='pill {cls}'>{i['state']}</span></td>"
+            f"<td class='mut small'>{html.escape(fmt_time(i['expires_at'])[5:])}</td>"
+            f"<td class='mut small'>{html.escape(i['used_by'] or '—')}</td></tr>"
+        )
+    return ("<table class='tasks-table'>"
+            "<tr><th>邀请码</th><th>面额</th><th>状态</th>"
+            "<th>有效期至</th><th>使用者</th></tr>"
+            + "".join(tr) + "</table>")
+
+
+def _ledger_rows(uid: str) -> str:
+    """余额流水。带"记账后余额"是为了能直接对账。"""
+    from . import billing
+
+    items = billing.ledger_of(uid, limit=20)
+    if not items:
+        return '<div class="empty">还没有流水记录。</div>'
+    kind_label = {"initial": "新用户赠送", "invite": "邀请码充值",
+                  "asr": "云语音识别", "adjust": "调整"}
+    tr = []
+    for x in items:
+        amt = x["amount"]
+        cls = "ok" if amt > 0 else "warn"
+        sign = "+" if amt > 0 else ""
+        tr.append(
+            f"<tr><td class='mut small'>{html.escape(fmt_time(x['created_at'])[5:])}</td>"
+            f"<td>{html.escape(kind_label.get(x['kind'], x['kind']))}"
+            f"{(' · ' + html.escape(x['bvid'])) if x['bvid'] else ''}</td>"
+            f"<td><span class='pill {cls}'>{sign}{amt:.4f}</span></td>"
+            f"<td class='mut small'>¥{x['balance']:.2f}</td></tr>"
+        )
+    return ("<table class='tasks-table'>"
+            "<tr><th>时间</th><th>事由</th><th>金额</th><th>记账后余额</th></tr>"
+            + "".join(tr) + "</table>")
+
+
+@app.get("/balance", response_class=HTMLResponse)
+def balance_page(request: Request, ok: str = "", err: str = ""):
+    """余额页：看余额、用邀请码充值；管理员还能生成邀请码。
+
+    为什么不用纯 JSON 接口：使用者不懂 API，他们需要"点一下"。
+    """
+    from . import billing
+
+    sess = current_session(request)
+    if not sess:
+        return RedirectResponse("/?need_login=1", status_code=303)
+
+    uid = sess["uid"]
+    uname = sess.get("uname", "")
+    admin = billing.is_admin(uid)
+    b = billing.get(uid, uname)
+
+    # 提示条：成功与失败分开渲染，颜色不同
+    banner = ""
+    if ok:
+        banner = f'<div class="note ok">✅ {html.escape(ok)}</div>'
+    if err:
+        banner = f'<div class="note">⚠️ {html.escape(err)}</div>'
+
+    if admin:
+        balance_block = (
+            '<div class="kv"><b>余额</b>'
+            '<span class="pill ok">不限（管理员账号）</span></div>'
+            '<p class="mut small" style="margin:10px 0 0">'
+            '管理员不受余额限制。无字幕视频产生的云 ASR 费用仍会记账，'
+            '只是不会拦住你。</p>'
+        )
+    else:
+        floor = billing.balance_floor()
+        # 免费额度进度：阿里云每月免费 10 小时，但**余额不按月重置**，
+        # 所以这里只做展示（"什么时候开始真花钱"），不参与扣费计算。
+        free_total = billing.free_seconds_per_month()
+        free_used = billing.asr_seconds_this_month()
+        if free_total > 0:
+            pct = min(100, round(free_used / free_total * 100))
+            left_min = max(0, free_total - free_used) // 60
+            hint = (f"本月云识别已用 {free_used // 60} 分钟 / "
+                    f"免费额度 {free_total // 60} 分钟（剩 {left_min} 分钟）")
+            free_html = (
+                f'<div class="bar" style="margin-top:12px">'
+                f'<span style="width:{pct}%"></span></div>'
+                f'<p class="mut small" style="margin:8px 0 0">{hint}</p>'
+            )
+        else:
+            free_html = ""
+
+        balance_block = (
+            f'<div class="kv" style="font-size:26px"><b>¥{b.balance:.2f}</b></div>'
+            f'<p class="mut small" style="margin:10px 0 0">'
+            f'有站内字幕的视频<b>不花钱</b>；只有无字幕视频才会消耗余额'
+            f'（按视频时长 × ¥{billing.price_per_second():.5f}/秒）。<br>'
+            f'余额可用到 −¥{floor:.2f}（给新用户留的试错空间）。</p>'
+            f"{free_html}"
+        )
+
+    admin_block = ""
+    if admin:
+        admin_block = f"""
+        <h2>邀请码 <span class="mut small">管理员</span></h2>
+        <div class="card">
+          <form method="post" action="/invites">
+            <div class="row">
+              <button type="submit">生成 {billing.invite_batch()} 个邀请码</button>
+              <span class="mut small">
+                每个 ¥{billing.invite_credit():.2f} · 有效期
+                {billing.invite_ttl() // 60} 分钟 · 用一次即作废
+              </span>
+            </div>
+          </form>
+        </div>
+        <div class="card">{_invite_rows(uid)}</div>
+        """
+
+    body = f"""
+    <header><h1>余额</h1>
+      <span class="pill">{html.escape(uname or uid)}</span>
+    </header>
+    {banner}
+    <div class="card">{balance_block}</div>
+
+    <h2>充值</h2>
+    <div class="card">
+      <form method="post" action="/redeem">
+        <div class="row">
+          <input type="text" name="code" placeholder="输入邀请码"
+                 autocomplete="off" maxlength="16" required>
+          <button type="submit">充值</button>
+        </div>
+        <p class="mut small" style="margin:10px 0 0">
+          邀请码由管理员发放，每个 ¥{billing.invite_credit():.2f}，用一次即作废。
+        </p>
+      </form>
+    </div>
+
+    {admin_block}
+
+    <h2>流水 <span class="mut small">最近 20 条</span></h2>
+    <div class="card">{_ledger_rows(uid)}</div>
+    {_nav(sess, current="/balance")}
+    """
+    return _page(body)
+
+
+@app.post("/redeem")
+def redeem_invite(request: Request, code: str = Form(...)):
+    """用邀请码充值。
+
+    失败时**重定向回余额页并带错误信息**，而不是抛 HTTPException ——
+    使用者看到的应该是一句人话，不是一个 400 页面。
+    """
+    from urllib.parse import quote
+
+    from . import billing
+
+    sess = current_session(request)
+    if not sess:
+        return RedirectResponse("/?need_login=1", status_code=303)
+    try:
+        amount, balance = billing.redeem(code, sess["uid"])
+    except billing.BillingError as exc:
+        return RedirectResponse(f"/balance?err={quote(str(exc))}", status_code=303)
+    msg = f"充值成功，+¥{amount:.2f}，当前余额 ¥{balance:.2f}"
+    return RedirectResponse(f"/balance?ok={quote(msg)}", status_code=303)
+
+
+@app.post("/invites")
+def create_invites(request: Request):
+    """生成邀请码（**仅管理员**）。"""
+    from urllib.parse import quote
+
+    from . import billing
+
+    sess = current_session(request)
+    if not sess:
+        return RedirectResponse("/?need_login=1", status_code=303)
+    if not billing.is_admin(sess["uid"]):
+        return RedirectResponse(
+            f"/balance?err={quote('只有管理员可以生成邀请码')}", status_code=303)
+
+    codes = billing.generate_invites(sess["uid"])
+    msg = "已生成 " + "、".join(c["code"] for c in codes)
+    return RedirectResponse(f"/balance?ok={quote(msg)}", status_code=303)
+
+
 # ---------------- 任务 ----------------
 
 
@@ -1326,11 +1479,6 @@ def task_page(task_id: str, request: Request):
     return _page(body)
 
 
-def _sec(label: str) -> int:
-    parts = [int(x) for x in str(label).split(":")]
-    return parts[0] * 3600 + parts[1] * 60 + parts[2] if len(parts) == 3 else 0
-
-
 def _paragraphs(text: str) -> str:
     """把长段落按句渲染成多个 <p>，与产物的 Markdown 排版保持一致。
 
@@ -1343,145 +1491,6 @@ def _paragraphs(text: str) -> str:
                    for x in _split_sentences(text))
 
 
-def _timeline_html(bvid: str, highlights: list[dict]) -> str:
-    """横向箭头时间轴 + 可冒泡、可点击跳转的节点。
-
-    交互（按用户要求）：
-      · **点击节点（圆点或文字都可）→ 平滑滚动到下方对应要点**，不是跳视频
-      · 悬停/聚焦 → 弹气泡显示要点信息，气泡里也有「跳到要点」
-      · 跳原视频的动作**下移**到要点段落里的时间戳
-
-    实现要点见 CSS 注释：气泡挂在 `.tl-bubble-layer`（**不在滚动容器内**），
-    位置由 JS 按节点的实际屏幕坐标计算 —— 这是解决遮挡的关键。
-    """
-    if not highlights:
-        return ""
-    nodes, bubbles = [], []
-    for i, h in enumerate(highlights, 1):
-        idx = h.get("point_index", -1)
-        linked = isinstance(idx, int) and idx >= 0
-        target = f"kp-{idx + 1}" if linked else ""
-        detail = (h.get("detail") or "").strip()
-        jump = (
-            f'<a href="#{target}" data-goto="{target}">↓ 跳到要点 {idx + 1}</a>'
-            if linked else '<span class="mut">未关联要点</span>'
-        )
-        nodes.append(
-            f'<button class="tl-node" type="button" data-bubble="tl-b-{i}"'
-            f' data-goto="{target}" aria-label="跳到要点 {idx + 1 if linked else 0}">'
-            f'<span class="dot"></span>'
-            f'<span class="at">{html.escape(h.get("at", ""))}</span>'
-            f'<span class="cap">{html.escape(h.get("text", ""))}</span>'
-            f"</button>"
-        )
-        body = f'<div class="bx">{html.escape(detail or h.get("text", ""))}</div>' if detail else ""
-        bubbles.append(
-            f'<div class="tl-bubble" id="tl-b-{i}">'
-            f'<div class="bt">{html.escape(h.get("at", ""))}<b>节点 {i}</b></div>'
-            f'<div class="bx">{html.escape(h.get("text", ""))}</div>'
-            f"{body}"
-            f'<div class="ba">{jump}</div>'
-            f"</div>"
-        )
-    return (
-        '<h2>关键时间轴 <span class="mut small">'
-        "点节点直接滚到下方要点 · 悬停看详情</span></h2>"
-        '<div class="card tl-card">'
-        f'<div class="tl-bubble-layer">{"".join(bubbles)}</div>'
-        f'<div class="tl-scroll"><div class="tl-axis">{"".join(nodes)}</div></div>'
-        '<div class="tl-hint">跳原视频请点下方要点段落里的时间戳；'
-        "也可以用 <kbd>Tab</kbd> 逐个聚焦节点。</div>"
-        "</div>"
-        + _TIMELINE_JS
-    )
-
-
-_TIMELINE_JS = """
-<script>
-(function () {
-  document.querySelectorAll('.tl-card').forEach(function (card) {
-    const layer = card.querySelector('.tl-bubble-layer');
-    const scroll = card.querySelector('.tl-scroll');
-    const nodes = [...card.querySelectorAll('.tl-node')];
-    if (!layer || !nodes.length) return;
-
-    function place(node) {
-      const b = document.getElementById(node.dataset.bubble);
-      if (!b) return;
-      const nr = node.getBoundingClientRect();
-      const cr = card.getBoundingClientRect();
-      b.style.left = (nr.left - cr.left + nr.width / 2) + 'px';
-      b.style.top = (nr.top - cr.top - b.offsetHeight - 10) + 'px';
-    }
-    function hideAll() {
-      layer.querySelectorAll('.tl-bubble').forEach(x => x.classList.remove('show'));
-      nodes.forEach(n => n.classList.remove('active'));
-    }
-    function show(node) {
-      hideAll();
-      const b = document.getElementById(node.dataset.bubble);
-      if (!b) return;
-      b.classList.add('show');
-      node.classList.add('active');
-      place(node);
-      // 贴边时贴着卡片内沿，避免气泡被视口切掉
-      const br = b.getBoundingClientRect();
-      const cr = card.getBoundingClientRect();
-      if (br.left < cr.left + 6) {
-        b.style.left = (parseFloat(b.style.left) + (cr.left + 6 - br.left)) + 'px';
-      } else if (br.right > cr.right - 6) {
-        b.style.left = (parseFloat(b.style.left) - (br.right - (cr.right - 6))) + 'px';
-      }
-    }
-
-    // 悬停弹泡
-    nodes.forEach(function (n) {
-      n.addEventListener('mouseenter', () => show(n));
-      n.addEventListener('focus', () => show(n));
-      n.addEventListener('mouseleave', hideAll);
-      n.addEventListener('blur', hideAll);
-    });
-    // 横向滚动时气泡跟随
-    if (scroll) scroll.addEventListener('scroll', () => {
-      const act = card.querySelector('.tl-node.active');
-      if (act) place(act);
-    });
-    window.addEventListener('resize', hideAll);
-
-    // 点击节点（圆点或文字都算）→ 平滑滚到对应要点
-    function go(node) {
-      const id = node.dataset.goto;
-      if (!id) return;
-      const target = document.getElementById(id);
-      if (!target) return;
-      hideAll();
-      target.scrollIntoView({behavior: 'smooth', block: 'start'});
-      target.classList.add('flash');
-      setTimeout(() => target.classList.remove('flash'), 1600);
-    }
-    nodes.forEach(n => n.addEventListener('click', () => go(n)));
-    // 键盘：Enter / 空格（button 默认已处理，这里补一层保险）
-    nodes.forEach(n => n.addEventListener('keydown', function (e) {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(n); }
-    }));
-    // 气泡内的「跳到要点」链接同样是平滑滚动
-    layer.querySelectorAll('a[data-goto]').forEach(function (a) {
-      a.addEventListener('click', function (e) {
-        e.preventDefault();
-        const t = document.getElementById(a.dataset.goto);
-        if (!t) return;
-        hideAll();
-        t.scrollIntoView({behavior: 'smooth', block: 'start'});
-        t.classList.add('flash');
-        setTimeout(() => t.classList.remove('flash'), 1600);
-      });
-    });
-  });
-})();
-</script>
-"""
-
-
 def _to_bottom_html() -> str:
     """悬浮「回到底部 / 回到顶部」按钮 + 脚本。
 
@@ -1489,7 +1498,6 @@ def _to_bottom_html() -> str:
     避免文章过长，让用户可以快速到下载的部分。"
 
     实测产物 236~300 行，滚到下载区要很久，所以按钮默认显示「⬇ 到下载」。
-    同时给一个「⬆ 顶部」——滚到底之后想回去也一样费劲。
     两个按钮都是**滚动超过一屏才出现**：页面短的时候它们只是干扰。
     """
     return """
@@ -1511,8 +1519,7 @@ def _to_bottom_html() -> str:
     bottom.classList.toggle('show', y > THRESHOLD && !nearBottom);
     top.classList.toggle('show', y > THRESHOLD);
   }
-  // 平滑滚动：优先用 scrollTo({behavior:'smooth'})，
-  // 不支持时退回瞬时跳转（不要静默什么都不做）
+  // 平滑滚动：优先用 scrollTo({behavior:'smooth'})，不支持时退回瞬时跳转
   function scrollToEnd() {
     const h = document.documentElement.scrollHeight;
     if ('scrollBehavior' in document.documentElement.style) {
@@ -1528,14 +1535,8 @@ def _to_bottom_html() -> str:
       window.scrollTo(0, 0);
     }
   }
-  bottom.addEventListener('click', function (e) {
-    e.preventDefault();
-    scrollToEnd();
-  });
-  top.addEventListener('click', function (e) {
-    e.preventDefault();
-    scrollToTop();
-  });
+  bottom.addEventListener('click', function (e) { e.preventDefault(); scrollToEnd(); });
+  top.addEventListener('click', function (e) { e.preventDefault(); scrollToTop(); });
   window.addEventListener('scroll', sync, {passive: true});
   window.addEventListener('resize', sync);
   sync();
@@ -1543,8 +1544,26 @@ def _to_bottom_html() -> str:
 </script>
 """
 
+
+def _highlights_html(highlights: list[dict]) -> str:
+    """关键节点列表（原"时间轴"，已去掉时间戳与跳转）。
+
+    去掉时间戳后，highlights 退化为转折点短语列表，仅用于快速扫读视频脉络。
+    """
+    if not highlights:
+        return ""
+    items = "".join(
+        f'<li>{html.escape(h.get("text", ""))}</li>'
+        for h in highlights
+    )
+    return (
+        '<h2>关键节点 <span class="mut small">快速扫读脉络</span></h2>'
+        f'<div class="card"><ol style="margin:0;padding-left:22px;line-height:1.9">{items}</ol></div>'
+    )
+
+
 def _render_done(t, r: dict) -> str:
-    """已完成任务的详情渲染：速览 / 总结 / 时间轴 / 分段要点。"""
+    """已完成任务的详情渲染：速览 / 总结 / 关键节点 / 分段要点。"""
     from .summarize import _trim_insight
 
     kps = r.get("key_points") or []
@@ -1561,17 +1580,10 @@ def _render_done(t, r: dict) -> str:
             f'<span>{html.escape(_trim_insight(p["insight"]))}</span></div>'
             if p.get("insight") else ""
         )
-        anchors = " ".join(
-            f'<a href="https://www.bilibili.com/video/{t.bvid}?t={_sec(a)}" '
-            f'target="_blank" rel="noreferrer">▶ {html.escape(a)}</a>'
-            for a in (p.get("anchors") or [])
-        )
-        src = (f'<div class="kp-src">跳原视频：{anchors}</div>' if anchors
-               else '<div class="kp-src warn">⚠️ 无可靠出处</div>')
         blocks.append(
             f'<div class="kp" id="kp-{i}">'
             f'<h3 class="kp-h">{i}. {cat}{topic}</h3>'
-            f'{body}{insight}{src}</div>'
+            f'{body}{insight}</div>'
         )
 
     tldr = (
@@ -1583,14 +1595,14 @@ def _render_done(t, r: dict) -> str:
     {tldr}
     <h2>总结</h2>
     <div class="card">{_paragraphs(r.get('overall',''))}</div>
-    {_timeline_html(t.bvid, r.get('highlights') or [])}
+    {_highlights_html(r.get('highlights') or [])}
     <h2>要点 <span class="mut small">
-      {len(kps)} 条分段陈述 · 点时间戳跳原视频</span></h2>
+      {len(kps)} 条分段陈述</span></h2>
     <div class="card">{''.join(blocks)}</div>
     <h2>下载</h2>
     <div class="card row">
       <a class="pill" href="/files/{r.get('summary_file','')}">↓ 总结与要点</a>
-      <a class="pill" href="/files/{r.get('transcript_file','')}">↓ 逐字稿</a>
+      <a class="pill" href="/files/{r.get('transcript_file','')}">↓ 逐字稿（原文）</a>
     </div>
     <div class="card small mut">
       路线：{html.escape(r.get('transcript_source',''))} ·
@@ -1619,6 +1631,85 @@ def download(name: str):
     if not path.exists():
         raise HTTPException(404, "文件不存在")
     return FileResponse(path, media_type="text/markdown; charset=utf-8", filename=safe)
+
+
+# ---------------------------------------------------------------- 音频中转
+#
+# ## 这个路由为什么必须免登录
+#
+# 阿里云 Paraformer **只接受公网可访问的 URL**（官方 FAQ：不支持 Base64、
+# 不支持二进制流、不支持本地文件）。而 B 站 CDN 校验 Referer（实测：
+# 裸请求 403、带 Referer 200），阿里云的服务器**拉不到 B 站链接** ——
+# 实测提交会得到 `FILE_403_FORBIDDEN`。
+#
+# 所以音频必须由我们自己的服务器中转一次。而阿里云没有本站的登录凭据，
+# 这个路由**只能靠 token 自证**，不能要求会话。
+#
+# ## 安全考虑（公开路由，必须想清楚）
+#
+#  · token 用 `secrets.token_urlsafe(24)` 生成，不可枚举；
+#  · 一次性：取回结果后立即删文件并注销 token（见 asr_cloud.publish/release）；
+#  · 只服务 `data/relay` 目录内的文件，且文件名必须与 token 完全一致 ——
+#    杜绝路径穿越（不拼接用户输入做路径）；
+#  · 内容只是**公开视频的音频**，泄露风险有限；真正的敏感信息是凭据，
+#    那部分从不经过这里。
+#
+# ⚠️ 已知局限：如果服务器用 http 而非 https，同一链路上的第三方可能看到
+# token 而抢先下载。对个人自用可接受；对外开放时建议上 https。
+
+
+# ⚠️ 关于"用 IP 白名单限制成只允许阿里云访问"——**做不到，别白费力气**：
+#   · 走 Cloudflare 隧道时，服务看到的对端是 **Cloudflare 边缘节点**，不是阿里云；
+#   · 即使直连，阿里云拉取用的出口 IP 也不固定，写死了反而挡住真正的请求。
+# 所以真正的防护是"不可猜测 + 短命 + 一次性"，本路由已具备。
+# 另外提供一个**可选的** User-Agent 白名单（见 VD_RELAY_UA_PREFIX），
+# 用于在不依赖 IP 的前提下再收紧一层 —— 它同样不是安全边界，只是收窄面。
+
+
+def _relay_guard(request: Request, token: str) -> None:
+    """中转路由的访问检查。抽出来便于测试。
+
+    检查顺序有意从"最可能被攻击"到"最不可能"：
+    token 形态 → 是否启用白名单 → User-Agent。
+    """
+    if not token or "/" in token or "\\" in token or ".." in token:
+        raise HTTPException(400, "非法 token")
+
+    allow = os.getenv("VD_RELAY_UA_PREFIX", "").strip()
+    if allow:
+        ua = request.headers.get("user-agent", "")
+        if not ua.startswith(allow):
+            # 记下来：这条日志是排查"阿里云到底带了什么 UA"的唯一线索
+            log.warning("中转路由拒绝了非白名单 UA：%r", ua[:120])
+            raise HTTPException(403, "来源不被允许")
+
+    # 严格模式：要求"必须存在活跃的转写任务"，避免手工构造请求探测
+    if os.getenv("VD_RELAY_STRICT", "").strip().lower() in ("1", "true", "yes", "on"):
+        from . import asr_cloud
+
+        if not asr_cloud.has_pending():
+            log.warning("严格模式：无进行中的转写任务，拒绝中转请求")
+            raise HTTPException(403, "当前没有等待取音频的任务")
+
+
+@app.get("/relay/{token}")
+def relay_audio(token: str, request: Request):
+    """把中转的音频交给阿里云（或任何持有 token 的一方）下载。"""
+    from . import asr_cloud
+
+    _relay_guard(request, token)
+    path = asr_cloud.resolve(token)
+    if path is None:
+        raise HTTPException(404, "音频不存在或已过期")
+    suffix = path.suffix.lower()
+    media = {
+        ".m4s": "audio/mp4", ".mp4": "audio/mp4", ".m4a": "audio/mp4",
+        ".mp3": "audio/mpeg", ".wav": "audio/wav", ".aac": "audio/aac",
+    }.get(suffix, "application/octet-stream")
+    # 记一条日志：出问题时能知道"阿里云确实来取过"
+    log.info("中转音频被取走：token=%s… ua=%r", token[:8],
+             request.headers.get("user-agent", "")[:80])
+    return FileResponse(path, media_type=media)
 
 
 @app.get("/quota", response_class=HTMLResponse)

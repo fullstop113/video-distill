@@ -170,6 +170,7 @@ class Summary:
     usage: Usage
     elapsed: float
     tl_dr: str = ""                                  # 一行速览
+    main_viewpoints: list[str] = field(default_factory=list)  # up 主的主要观点（核心论点）
     highlights: list[TimelinePoint] = field(default_factory=list)   # 关键时间轴
     video_duration: int = 0                          # 秒，用于元信息
     transcript_chars: int = 0
@@ -685,10 +686,14 @@ def render_for_prompt(segments: list[Segment], with_timestamps: bool = False) ->
 
 SYSTEM_SINGLE = """你是一个严谨的中文视频内容分析师。用户会给你一份逐字稿。
 
-你的任务：产出速览、脉络总结、关键节点与**详细要点**。**必须输出 JSON**，格式如下（严格遵守字段名）：
+你的任务：产出速览、up 主主要观点、脉络总结、关键节点与**详细要点**。**必须输出 JSON**，格式如下（严格遵守字段名）：
 
 {
   "tl_dr": "一句话说清这个视频讲了什么，控制在 60 字以内",
+  "main_viewpoints": [
+    "up 主的一个核心观点或立场，1-2 句说清",
+    "另一个核心观点"
+  ],
   "overall": "对整体内容的脉络总结，3-6 句，说清讲了什么、脉络如何、结论是什么",
   "highlights": [
     {"text": "错失 DOTA，冰蛙被 Valve 招走"}
@@ -700,6 +705,14 @@ SYSTEM_SINGLE = """你是一个严谨的中文视频内容分析师。用户会�
      "insight": "一句话点出这一层的含义（≤25 字，不要复述内容）"}
   ]
 }
+
+## main_viewpoints 的定位
+
+up 主在这个视频里**真正想表达的核心观点 / 立场 / 判断**，不是内容复述，而是结论性主张。
+- 3-7 条，每条 1-2 句，直接给观点，不要铺垫。
+- 例：`"暴雪放弃风暴英雄的根本原因是团队判断难以统一，而非市场竞争"`。
+- 与 overall 的区别：overall 是"讲了什么脉络"，main_viewpoints 是"up 主主张什么"。
+- 与 key_points 的区别：key_points 是分段的完整陈述，main_viewpoints 是提炼后的论点清单。
 
 ## key_points 的定位（这一节最重要，务必按此标准）
 
@@ -753,10 +766,13 @@ SYSTEM_MAP = """你是一个严谨的中文视频内容分析师。用户会给�
 SYSTEM_REDUCE = """你是一个严谨的中文视频内容分析师。用户会给你一份**分段要点清单**
 （来自同一个长视频的不同片段）。
 
-你的任务：合并成速览、脉络总结、关键节点与**详细要点**。**必须输出 JSON**，格式如下：
+你的任务：合并成速览、up 主主要观点、脉络总结、关键节点与**详细要点**。**必须输出 JSON**，格式如下：
 
 {
   "tl_dr": "一句话说清这个视频讲了什么，≤60 字",
+  "main_viewpoints": [
+    "up 主的一个核心观点或立场，1-2 句"
+  ],
   "overall": "对整体内容的脉络总结，3-6 句",
   "highlights": [
     {"text": "转折点短语，≤20 字"}
@@ -768,6 +784,13 @@ SYSTEM_REDUCE = """你是一个严谨的中文视频内容分析师。用户会�
      "insight": "一句话点出含义（≤25 字）"}
   ]
 }
+
+## main_viewpoints 的定位
+
+up 主在这个视频里**真正想表达的核心观点 / 立场 / 判断**，不是内容复述。
+- 3-7 条，每条 1-2 句，直接给观点。
+- overall 是"讲了什么脉络"，main_viewpoints 是"up 主主张什么"。
+- key_points 是分段完整陈述，main_viewpoints 是提炼后的论点清单。
 
 ## 合并要求
 
@@ -802,8 +825,35 @@ def parse_ts(label: str) -> float | None:
     return None
 
 
+def _as_point_dict(p) -> dict:
+    """把模型返回的"要点项"统一成 dict。
+
+    ## 为什么必须有这一层
+
+    提示词要求 `key_points` 是 `[{"text": ..., "category": ...}]`，
+    但模型有时返回**纯字符串列表** `["要点一", "要点二"]`。
+
+    直接 `p.get(...)` 会抛 `AttributeError: 'str' object has no attribute 'get'`
+    —— 整条任务失败，而内容其实完全可用（只是少了分类等可选字段）。
+
+    实测这个 bug 在 `highlights` 上真实发生过（BV1xa4k6vEpp）。
+    `key_points` 是要点的**正文**，真丢了损失更大，所以这里一并防住。
+
+    容忍的形态：
+      · `{"text": ...}`      → 原样
+      · `{"point": ...}` 等 → 原样（下面按多个字段名兜底取值）
+      · `"一段文字"`          → 包成 `{"text": "一段文字"}`
+      · 其它（数字/None等）   → 返回空 dict，由调用方按"空要点"丢掉
+    """
+    if isinstance(p, dict):
+        return p
+    if isinstance(p, str):
+        return {"text": p}
+    return {}
+
+
 def validate_points(
-    raw_points: list[dict], segments: list[Segment], tolerance: float = 2.0
+    raw_points: list, segments: list[Segment], tolerance: float = 2.0
 ) -> tuple[list[KeyPoint], int]:
     """校验要点文本。
 
@@ -811,11 +861,14 @@ def validate_points(
     `segments` 与 `tolerance` 参数保留仅为向后兼容调用签名，当前不再使用。
     只过滤空文本要点，并解析 text / category / topic / insight 字段。
 
+    对**字符串形态的要点**做了容错，见 `_as_point_dict`。
+
     Returns:
         (校验后的要点, 被丢弃的锚点数，恒为 0)
     """
     out: list[KeyPoint] = []
-    for p in raw_points:
+    for raw in raw_points or []:
+        p = _as_point_dict(raw)
         text = (p.get("text") or "").strip()
         if not text:
             continue
@@ -924,7 +977,7 @@ def _trim_insight(text: str, limit: int = MAX_INSIGHT_CHARS) -> str:
 
 
 def normalize_highlights(
-    raw: list[dict],
+    raw: list,
     info,
     *,
     max_items: int = MAX_HIGHLIGHTS,
@@ -934,13 +987,32 @@ def normalize_highlights(
     去掉时间戳后，highlights 退化为"转折点短语列表"，只校验文本内容与条数上限。
     `info` 参数保留是为了向后兼容调用签名，当前不再使用。
 
+    ## ⚠️ 必须容忍"字符串列表"
+
+    提示词要求返回 `[{"text": "..."}]`，但**模型有时直接返回
+    `["定义薄肌", "体脂分级", ...]`** —— 实测报：
+
+        AttributeError: 'str' object has no attribute 'get'
+
+    这整条任务就失败了，而内容其实完全可用（就是格式简单了点）。
+
+    同一个文件里的 `_normalize_viewpoints()` 早就处理了这种容错，
+    这里却漏了 —— 两套标准。现在统一。
+
     Returns:
         (节点列表, 被丢弃的条数)
     """
     out: list[TimelinePoint] = []
     dropped = 0
-    for item in raw:
-        text = (item.get("text") or "").strip()
+    for item in raw or []:
+        # 三种形态都要接住：dict / str / 其它（丢弃）
+        if isinstance(item, dict):
+            text = (item.get("text") or item.get("caption")
+                    or item.get("title") or "").strip()
+        elif isinstance(item, str):
+            text = item.strip()
+        else:
+            text = ""
         if not text:
             dropped += 1
             continue
@@ -953,6 +1025,29 @@ def normalize_highlights(
         dropped += len(out) - max_items
         out = out[:max_items]
     return out, dropped
+
+
+# 主要观点的条数上限：超过这个数量说明模型在"把要点抄一遍"，而不是提炼论点。
+MAX_VIEWPOINTS = 8
+
+
+def _normalize_viewpoints(raw: list) -> list[str]:
+    """归一化 up 主主要观点列表。
+
+    模型可能返回字符串、dict（带 text 字段）或空值，这里统一清洗成
+    非空字符串列表，并做条数上限保护。
+    """
+    out: list[str] = []
+    for item in raw or []:
+        if isinstance(item, dict):
+            text = (item.get("text") or item.get("viewpoint") or "").strip()
+        else:
+            text = str(item or "").strip()
+        if text:
+            out.append(text)
+    if len(out) > MAX_VIEWPOINTS:
+        out = out[:MAX_VIEWPOINTS]
+    return out
 
 
 def _check_summary(overall: str, points: list[KeyPoint], where: str) -> None:
@@ -1005,6 +1100,7 @@ def summarize(
     dropped_hl = 0
     notes: list[str] = []
     tl_dr = ""
+    main_viewpoints: list[str] = []
     highlights: list[TimelinePoint] = []
     t0 = time.time()
 
@@ -1021,6 +1117,7 @@ def summarize(
         )
         usage.add(u)
         tl_dr = (data.get("tl_dr") or "").strip()
+        main_viewpoints = _normalize_viewpoints(data.get("main_viewpoints") or [])
         overall = (data.get("overall") or "").strip()
         points, dropped = validate_points(data.get("key_points") or [], segments)
         highlights, dropped_hl = normalize_highlights(
@@ -1054,13 +1151,14 @@ def summarize(
         user = (
             f"标题：{transcript.title}\n"
             f"以下是该视频各片段的要点（共 {len(merged_raw)} 条），"
-            f"请合并成整体速览、总结、关键时间轴与要点：\n\n{listing}"
+            f"请合并成整体速览、up 主主要观点、总结、关键节点与要点：\n\n{listing}"
         )
         data, u = client.json_call(
             SYSTEM_REDUCE, user, max_tokens=output_budget(len(listing))
         )
         usage.add(u)
         tl_dr = (data.get("tl_dr") or "").strip()
+        main_viewpoints = _normalize_viewpoints(data.get("main_viewpoints") or [])
         overall = (data.get("overall") or "").strip()
         points, dropped = validate_points(data.get("key_points") or [], segments)
         highlights, dropped_hl = normalize_highlights(
@@ -1094,6 +1192,7 @@ def summarize(
         usage=usage,
         elapsed=time.time() - t0,
         tl_dr=tl_dr,
+        main_viewpoints=main_viewpoints,
         highlights=highlights,
         video_duration=int(getattr(transcript.info, "duration", 0) or 0),
         transcript_chars=total_chars,
@@ -1192,6 +1291,22 @@ def _clean_insight(text: str) -> str:
     return t
 
 
+def _viewpoints_md(s: Summary) -> list[str]:
+    """up 主主要观点列表。
+
+    放在「总结」与「关键节点」之间：脉络看完之后，先看 up 主主张什么，
+    再看转折点和详细要点，扫读效率最高。
+    """
+    vs = getattr(s, "main_viewpoints", None) or []
+    if not vs:
+        return []
+    out = ["## 主要观点", ""]
+    for i, v in enumerate(vs, 1):
+        out.append(f"{i}. {v}")
+    out.append("")
+    return out
+
+
 def _timeline_md(s: Summary) -> list[str]:
     """关键节点列表（原"时间轴"，已去掉时间戳与跳转）。
 
@@ -1216,6 +1331,7 @@ def to_markdown(s: Summary) -> str:
         > 声明 + 一行元信息
         ## 速览              ← 一眼知道值不值得看
         ## 总结              ← 脉络，按句换行
+        ## 主要观点           ← up 主的核心论点，扫读主张
         ## 关键节点           ← 转折点短语列表，快速扫读脉络
         ## 要点              ← **分段精炼陈述**，不是摘要
         ### 生成记录
@@ -1252,6 +1368,8 @@ def to_markdown(s: Summary) -> str:
     lines += ["## 总结", ""]
     for para in _split_sentences(s.overall):
         lines += [para, ""]
+
+    lines += _viewpoints_md(s)
 
     lines += _timeline_md(s)
 

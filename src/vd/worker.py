@@ -32,7 +32,7 @@ from .bilibili import (
     RestrictedVideoError,
 )
 from .credentials import CredentialPolicyError, load_operator_credentials
-from .pipeline import QuotaExceeded, run_pipeline
+from .pipeline import AsrNotConfigured, QuotaExceeded, run_pipeline
 from .summarize import DeepSeekClient, SummarizeError
 from .transcript import NoTranscriptError
 
@@ -114,16 +114,31 @@ class Worker:
             return
 
         client = BiliClient(creds)
+        # 云 ASR 的应扣额度。由 pipeline 在**转写成功**时回填 ——
+        # 一旦这里非零，就说明钱已经花给阿里云了。
+        charges = {"uid": creds.uid, "amount": 0.0, "bvid": task.bvid,
+                   "seconds": 0}
         try:
             result = run_pipeline(
                 client, task.bvid,
                 uid=creds.uid,
                 out_dir=self.out_dir,
                 llm=None,  # 由 run_pipeline 内部按环境变量构造
+                # 允许"无字幕 → 云 ASR"这条路。它**要花钱**，
+                # 所以 pipeline 会先查余额再下载音频（见其模块说明）。
+                allow_asr=True,
                 on_stage=on_stage,
+                charges=charges,
             )
         except QuotaExceeded as exc:
-            tasks.fail(task.id, f"配额不足：{exc}")
+            tasks.fail(task.id, f"额度不足：{exc}")
+        except AsrNotConfigured as exc:
+            # 云 ASR 没配好。这**不是用户能解决的问题**（是部署配置），
+            # 所以要说清"找管理员"以及该配什么。
+            tasks.fail(
+                task.id,
+                f"该视频没有站内字幕，需要云语音识别，但服务未配置完整。\n\n{exc}",
+            )
         except RestrictedVideoError as exc:
             # 权限受限（充电专属/付费预览）：这是**用户能理解并可能自行解决**的情况，
             # 不该和"接口报错"混在一起。给出可操作的说明。
@@ -157,27 +172,16 @@ class Worker:
                 "chars": result.transcript.char_count,
                 "segments": len(result.transcript.segments),
                 "points": len(result.summary.key_points),
-                "anchored_points": sum(1 for p in result.summary.key_points if p.anchors),
                 "strategy": result.summary.strategy.value,
                 "cost_cny": round(result.cost_cny, 4),
+                "asr_cost_cny": round(result.asr_cost_cny, 4),
                 "transcript_file": result.transcript_path.name,
                 "summary_file": result.summary_path.name,
                 "tl_dr": result.summary.tl_dr,
                 "overall": result.summary.overall,
+                # 关键节点只保留文字（已去掉时间戳与跳转）
                 "highlights": [
-                    {
-                        "at": h.label,
-                        "sec": int(h.at),
-                        "text": h.text,
-                        # 前端靠它把气泡链接到下方对应的要点段落
-                        "point_index": h.point_index,
-                        # 气泡里可以顺带显示对应要点的陈述（悬停即读到内容）
-                        "detail": (
-                            result.summary.key_points[h.point_index].text
-                            if 0 <= h.point_index < len(result.summary.key_points)
-                            else ""
-                        ),
-                    }
+                    {"text": h.text}
                     for h in result.summary.highlights
                 ],
                 "key_points": [
@@ -186,7 +190,6 @@ class Worker:
                         "text": p.text,
                         "insight": p.insight,
                         "category": p.category,
-                        "anchors": p.anchor_labels(),
                     }
                     for p in result.summary.key_points
                 ],
@@ -210,9 +213,45 @@ class Worker:
                 n_chunks=max(result.summary.usage.calls - 1, 0),
             )
             log.info("任务 %s 完成（¥%.4f）", task.id, result.cost_cny)
+        finally:
+            # ⚠️ 扣费必须在 finally 里，**独立于任务成败**。
+            #
+            # 理由：云 ASR 的钱在"转写成功"那一刻就付给阿里云了。
+            # 如果之后总结失败／落盘失败，那笔钱**照样花掉了**。
+            # 挂在 `else`（成功分支）上会导致"花了钱却不扣账"，
+            # 账面成本低于真实成本 —— 而这个账本是用来控制成本的，
+            # 少记就等于失控。
+            #
+            # pipeline 只在**转写真的成功**时才把金额写进 charges，
+            # 所以"转写失败"不会被误扣。
+            self._commit_charge(charges)
 
         # 给使用者一点间隔，避免连续任务把风控惹毛
         self._stop.wait(0.5)
+
+    def _commit_charge(self, charges: dict) -> None:
+        """把云 ASR 的应扣额度真正写入余额。
+
+        失败只记日志、**不让任务变成失败** —— 产物已经生成了，用户要的是产物。
+        但必须留下明显日志：这是账目问题，静默失败等于账本失真。
+        """
+        amount = float(charges.get("amount") or 0.0)
+        if amount <= 0:
+            return
+        from . import billing
+
+        uid = charges.get("uid") or ""
+        bvid = charges.get("bvid") or ""
+        seconds = int(charges.get("seconds") or 0)
+        try:
+            left = billing.charge(uid, amount, bvid=bvid,
+                                  note="云语音识别（无字幕视频）",
+                                  seconds=seconds)
+            log.info("已扣云 ASR 费用 ¥%.4f（%d 秒，uid=%s，余额剩 ¥%.2f）",
+                     amount, seconds, uid, left)
+        except Exception:  # noqa: BLE001
+            log.exception("扣云 ASR 费用失败（uid=%s 金额=%.4f）—— 需人工核对",
+                          uid, amount)
 
 
 def make_llm() -> DeepSeekClient:

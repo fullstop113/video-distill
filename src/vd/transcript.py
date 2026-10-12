@@ -47,26 +47,62 @@ MIN_TRANSCRIPT_CHARS = 80
 
 
 class NoTranscriptError(RuntimeError):
-    """取不到任何可用逐字稿。
+    """取不到任何可用逐字稿（**仅指站内字幕**）。
 
-    本项目**不再做 ASR 兜底**，所以这通常意味着：
-      该视频既没有人工字幕、也没有 B 站 AI 字幕。
+    ## 这一层不做 ASR —— 但会告诉上层"能不能试"
+
+    本模块只负责站内字幕。没有字幕时抛这个异常，**由上层决定**要不要花钱
+    走云 ASR（见 `vd.pipeline`）。
+
+    为什么不在这一层直接兜底？因为那条路**要花钱**、还要先查余额，
+    属于业务编排，不该藏在"取逐字稿"里。
+
+    ## `no_subtitle` 字段：区分"确认没有"与"有但坏了"
+
+    这个区别很重要，因为两者的处理方式完全相反：
+
+      · `no_subtitle=True`  → `NoSubtitleError`，**确认**没有字幕轨，
+        这才是可以走 ASR 的信号（`bilibili.py` 里就是这么定义的）。
+      · `no_subtitle=False` → 字幕轨**存在**但内容过短/为空。
+        这种情况走 ASR 是**错的** —— 我们有字幕，只是质量差；
+        而且经验上这往往意味着视频本身有问题（试看预览、受限内容），
+        去下载音频多半也拿不到完整音轨，白花一笔钱。
+
+    上层只看这个字段，不需要自己解析错误信息。
     """
+
+    def __init__(self, message: str, *, no_subtitle: bool = False):
+        super().__init__(message)
+        self.no_subtitle = no_subtitle
 
 
 class TranscriptSource(str, Enum):
     SUBTITLE = "subtitle"          # B 站站内字幕（含 AI 字幕）
     SUBTITLE_CACHE = "subtitle_cache"
+    # 云 ASR（阿里云 Paraformer）：**仅在没有站内字幕时**使用，
+    # 会产生真实费用，所以它是一条"要花钱"的来源，与字幕区分开。
+    ASR = "asr"
 
     @property
     def uses_gpu(self) -> bool:
+        """是否占用本机 GPU。
+
+        云 ASR 不占本机资源 —— 这正是选它的原因（服务器可以是最低配）。
+        保留这个属性是因为 worker 与产物头部都要展示"是否消耗 GPU"。
+        """
         return False
+
+    @property
+    def costs_money(self) -> bool:
+        """是否产生**真金白银**的费用。只有云 ASR 会。"""
+        return self is TranscriptSource.ASR
 
     @property
     def label(self) -> str:
         return {
             TranscriptSource.SUBTITLE: "B 站站内字幕",
             TranscriptSource.SUBTITLE_CACHE: "B 站站内字幕（缓存）",
+            TranscriptSource.ASR: "云语音识别（阿里云 Paraformer）",
         }[self]
 
 
@@ -263,11 +299,23 @@ def fetch_transcript(
         notes.append(f"字幕轨道存在但正文过短（{len(text)} 字）")
         say("字幕内容过短")
 
-    # ---------- 没有可用字幕：直接报错，不做 ASR 兜底 ----------
+    # ---------- 没有可用字幕：抛出信号，由上层决定是否走云 ASR ----------
+    #
+    # 这里**不做 ASR**：那条路要花钱、还要先查余额，属于业务编排。
+    # 但也不该直接死掉 —— 通过 no_subtitle 告诉上层"这是确认无字幕，
+    # 可以花钱试 ASR"，而不是"字幕坏了，试 ASR 也没用"。
+    if no_subtitle:
+        raise NoTranscriptError(
+            f"该视频没有站内字幕（人工字幕与 B 站 AI 字幕均不存在）。"
+            f"可以改用云语音识别（需消耗余额）。",
+            no_subtitle=True,
+        )
     raise NoTranscriptError(
-        f"该视频没有可用的字幕（人工字幕与 B 站 AI 字幕均不存在）{short_text}。\n\n"
-        "本服务依赖 B 站提供的字幕生成逐字稿，不再对无字幕视频做语音识别兜底。\n"
-        "可以换一个带字幕的视频再试。"
+        f"字幕轨道存在但正文不可用{short_text}。\n"
+        f"本项目只接受有实质内容的字幕，不做语音识别兜底 —— "
+        f"这类视频（常见于试看预览或受限内容）改用语音识别通常也取不到完整音轨，"
+        f"建议换一个视频。",
+        no_subtitle=False,
     )
 
 
@@ -304,10 +352,9 @@ def to_markdown(t: Transcript) -> str:
         "",
         artifact_header(source, t.bvid),
         "",
-        f"- BV：{t.bvid}   UP：{t.info.owner_name}   时长：{ts(t.info.duration)}",
+        f"- BV：{t.bvid}   UP：{t.info.owner_name}   时长：{t.info.duration // 60} 分钟",
         f"- 取数路线：**{source}**",
-        f"- 逐字稿：{t.char_count} 字，{len(t.segments)} 段，"
-        f"覆盖至 {ts(t.duration_covered)}",
+        f"- 逐字稿：{t.char_count} 字，{len(t.segments)} 段",
         f"- 链接：https://www.bilibili.com/video/{t.bvid}",
     ]
     if t.corrections:
@@ -316,9 +363,11 @@ def to_markdown(t: Transcript) -> str:
     if t.timing:
         cost = "，".join(f"{k} {v:.2f}s" for k, v in t.timing.items())
         lines.append(f"- 耗时：{cost}")
+    # 逐字稿输出纯文本段落，不带时间戳：用户不看原视频，时间戳无意义，
+    # 且会占据大量篇幅、增加发给大模型的 token 消耗。
     lines += ["", "## 逐字稿", ""]
     for seg in t.segments:
-        lines.append(f"**[{ts(seg.start)}]** {seg.text}")
+        lines.append(seg.text)
         lines.append("")
     if t.notes:
         lines += ["---", "", "### 处理记录", ""]

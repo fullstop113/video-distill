@@ -29,6 +29,16 @@ from .storage import Credentials, list_uids, load_credentials
 
 log = logging.getLogger(__name__)
 
+# "磁盘上有非操作号凭据"这条警告**只在每个进程里打一次**。
+#
+# 原因：`load_operator_credentials()` 在 Web 层有 5 处调用点、
+# 每次页面请求都会走到，而它原本无条件 warning ——
+# 实测一次页面浏览就能刷出几十行同样的警告，把真正的日志淹掉。
+#
+# 但也不能不打：它指出的是**数据状态问题**（磁盘上有多余凭据，占用空间
+# 且增加误用风险），用户需要知道。所以第一次 warning，之后降级为 debug。
+_warned_extra_creds = False
+
 
 class CredentialPolicyError(RuntimeError):
     """凭据使用违反大号/小号分离策略。"""
@@ -114,12 +124,24 @@ def load_operator_credentials(required: bool = True) -> Credentials | None:
         return None
 
     others = [u for u in list_uids() if u != op]
-    if others:
+    if others and not _warned_extra_creds:
+        # ⚠️ 必须**只警告一次**。
+        #
+        # `load_operator_credentials()` 在 Web 层每次请求都会调用
+        # （web.py 有 5 处调用点），而这条警告原本无条件打印 ——
+        # 实测一次页面浏览就能刷出几十行同样的警告，把真正的日志淹掉。
+        #
+        # 但也不能不打：它指出的是**数据状态问题**（磁盘上有多余凭据），
+        # 用户需要知道。所以打一次，之后降到 debug。
+        globals()["_warned_extra_creds"] = True
         log.warning(
             "检测到非操作号的凭据已落盘：%s。它们**不会被用于取数**"
-            "（白名单只放行 UID=%s）。建议用 `python scripts/login.py --logout` 清理。",
+            "（白名单只放行 UID=%s）。建议用 `python scripts/login.py --logout` 清理。"
+            "（此提示每个进程只打一次）",
             others, op,
         )
+    elif others:
+        log.debug("仍有非操作号凭据：%s", others)
     return creds
 
 

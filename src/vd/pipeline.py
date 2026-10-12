@@ -281,10 +281,13 @@ def run_pipeline(
         progress=lambda m: stage(STAGE_SUMMARIZE, m),
     )
     notes.extend(summary.notes)
-    anchored = sum(1 for p in summary.key_points if p.anchors)
+    # ⚠️ 这里原先报"（N 条带锚点）"，但锚点能力已在 2026 的设计变更中移除
+    # （见本模块顶部说明）。日志留着旧字段会让人以为锚点还在。
+    # 改成报对使用者有用的信息。
     stage(
         STAGE_SUMMARIZE,
-        f"{len(summary.key_points)} 条要点（{anchored} 条带锚点）· ¥{summary.cost_cny:.4f}",
+        f"{len(summary.key_points)} 条要点 · {summary.strategy.value} · "
+        f"¥{summary.cost_cny:.4f}",
     )
 
     # ---------- 4. 落盘 ----------
